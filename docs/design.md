@@ -16,7 +16,7 @@ internal/tools/       one file per tool; schemas and handlers
 
 - Every MCP HTTP request must carry `Authorization: Bearer <token>`. Missing → HTTP 401 with `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource"`.
 - `/.well-known/oauth-protected-resource` names bot-api-server as the authorization server. The browser authorization-code flow for MCP clients is wave 2. In wave 1, clients use `deploybot login`.
-- The token is forwarded unchanged to bot-api-server, which decides everything. A 401 from the API becomes an MCP 401; any other API error becomes a tool error with the API's `code` and `msg`.
+- The token is forwarded unchanged to bot-api-server, which decides everything. A 401 from the API during a tool call becomes a tool error `unauthorized: <msg>` (HTTP 200): the MCP Go SDK v1.8.0 cannot return HTTP 401 from inside a tool result. Any other API error becomes a tool error with the API's `code` and `msg`.
 
 ## Phase 1 tools
 

@@ -1,0 +1,788 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/more-than-code/bot-mcp-server/internal/apiclient"
+)
+
+const (
+	projectID     = "11111111-1111-4111-8111-111111111111"
+	manyProjectID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	hostID        = "22222222-2222-4222-8222-222222222222"
+	serviceID     = "33333333-3333-4333-8333-333333333333"
+	checkID       = "44444444-4444-4444-8444-444444444444"
+	userToken     = "session-token.abc~def"
+)
+
+func TestMissingAndInvalidToken(t *testing.T) {
+	fake := &fakeAPI{}
+	mcpSrv, _ := newTestServer(t, fake)
+	wantAuth := `Bearer resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"`
+	cases := []struct {
+		name   string
+		header string
+	}{
+		{name: "absent"},
+		{name: "empty scheme", header: "Bearer"},
+		{name: "blank token", header: "Bearer "},
+		{name: "basic", header: "Basic abc"},
+		{name: "embedded newline", header: "Bearer tok\nen"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := fake.count()
+			// A newline cannot be sent with http.Client; call the handler directly.
+			if strings.Contains(tc.header, "\n") {
+				req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+				req.Header["Authorization"] = []string{tc.header}
+				rec := httptest.NewRecorder()
+				mcpSrv.Config.Handler.ServeHTTP(rec, req)
+				if rec.Code != http.StatusUnauthorized {
+					t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+				}
+				if got := rec.Header().Get("WWW-Authenticate"); got != wantAuth {
+					t.Fatalf("WWW-Authenticate = %q", got)
+				}
+				if fake.count() != before {
+					t.Fatalf("api calls %d, want %d", fake.count(), before)
+				}
+				return
+			}
+			req, err := http.NewRequest(http.MethodPost, mcpSrv.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status %d body %s", resp.StatusCode, body)
+			}
+			if got := resp.Header.Get("WWW-Authenticate"); got != wantAuth {
+				t.Fatalf("WWW-Authenticate = %q", got)
+			}
+			if fake.count() != before {
+				t.Fatalf("api calls %d, want %d", fake.count(), before)
+			}
+		})
+	}
+}
+
+func TestHealthAndProtectedResource(t *testing.T) {
+	fake := &fakeAPI{}
+	mcpSrv, _ := newTestServer(t, fake)
+
+	health, err := http.Get(mcpSrv.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer health.Body.Close()
+	healthBody, _ := io.ReadAll(health.Body)
+	if health.StatusCode != http.StatusOK {
+		t.Fatalf("health status %d", health.StatusCode)
+	}
+	if strings.TrimSpace(string(healthBody)) != `{"status":"ok"}` {
+		t.Fatalf("health body %s", healthBody)
+	}
+
+	meta, err := http.Get(mcpSrv.URL + "/.well-known/oauth-protected-resource")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Body.Close()
+	var doc struct {
+		Resource               string   `json:"resource"`
+		AuthorizationServers   []string `json:"authorization_servers"`
+		BearerMethodsSupported []string `json:"bearer_methods_supported"`
+	}
+	if err := json.NewDecoder(meta.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Resource != "https://mcp.example" {
+		t.Fatalf("resource %q", doc.Resource)
+	}
+	if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != fake.base {
+		t.Fatalf("authorization_servers %#v", doc.AuthorizationServers)
+	}
+	if len(doc.BearerMethodsSupported) != 1 || doc.BearerMethodsSupported[0] != "header" {
+		t.Fatalf("bearer_methods %#v", doc.BearerMethodsSupported)
+	}
+	if fake.count() != 0 {
+		t.Fatalf("unauthenticated routes called the api %d times", fake.count())
+	}
+}
+
+func TestTools(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	if cs.InitializeResult() == nil {
+		t.Fatal("missing initialize result")
+	}
+	t.Logf("negotiated protocol %s", cs.InitializeResult().ProtocolVersion)
+
+	listed, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openWorld := map[string]bool{"host_snapshot": true, "probe_service": true}
+	seen := map[string]bool{}
+	for _, tool := range listed.Tools {
+		seen[tool.Name] = true
+		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			t.Errorf("%s readOnlyHint missing", tool.Name)
+		}
+		open := tool.Annotations != nil && tool.Annotations.OpenWorldHint != nil && *tool.Annotations.OpenWorldHint
+		if open != openWorld[tool.Name] {
+			t.Errorf("%s openWorldHint = %v", tool.Name, open)
+		}
+		if tool.Description == "" {
+			t.Errorf("%s has no description", tool.Name)
+		}
+		if openWorld[tool.Name] && !strings.Contains(tool.Description, "contacts the host now") {
+			t.Errorf("%s description %q", tool.Name, tool.Description)
+		}
+		if !openWorld[tool.Name] && !strings.Contains(tool.Description, "Does not contact") {
+			t.Errorf("%s description %q", tool.Name, tool.Description)
+		}
+	}
+	for _, name := range []string{
+		"list_projects", "list_hosts", "list_services", "query_metrics",
+		"list_processes", "service_health_history", "host_snapshot", "probe_service",
+	} {
+		if !seen[name] {
+			t.Errorf("missing tool %s", name)
+		}
+	}
+	if len(seen) != 8 {
+		t.Fatalf("tool count %d", len(seen))
+	}
+
+	res := mustCall(t, cs, "list_projects", map[string]any{})
+	assertTool(t, fake, res, http.MethodGet, "/v1/me", "", "")
+	if !strings.Contains(textOf(t, res), "1 projects: lab (owner)") {
+		t.Fatalf("list_projects text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "list_hosts", map[string]any{"project_id": projectID})
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/hosts", "", "")
+	if textOf(t, res) != "1 hosts: pi1 online" {
+		t.Fatalf("list_hosts text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "list_services", map[string]any{"host_id": hostID})
+	assertTool(t, fake, res, http.MethodGet, "/v1/hosts/"+hostID+"/services", "", "")
+	if !strings.Contains(textOf(t, res), "1 services: api up") {
+		t.Fatalf("list_services text %q", textOf(t, res))
+	}
+
+	from := "2026-10-13T00:00:00Z"
+	to := "2026-10-13T01:00:00Z"
+	res = mustCall(t, cs, "query_metrics", map[string]any{
+		"host_id": hostID, "metric": "cpu", "from": from, "to": to, "step": 60,
+	})
+	assertTool(t, fake, res, http.MethodGet, "/v1/hosts/"+hostID+"/metrics", "from="+url.QueryEscape(from)+"&m=cpu&step=60&to="+url.QueryEscape(to), "")
+	if !strings.Contains(textOf(t, res), "cpu: 1 series, 1 points") {
+		t.Fatalf("query_metrics text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "list_processes", map[string]any{"host_id": hostID, "sort": "memory", "limit": 2})
+	assertTool(t, fake, res, http.MethodGet, "/v1/hosts/"+hostID+"/processes", "limit=2&sort=memory", "")
+	if !strings.Contains(textOf(t, res), "1 processes at 2026-10-13T00:00:00Z: bot") {
+		t.Fatalf("list_processes text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "service_health_history", map[string]any{"service_id": serviceID, "from": from, "to": to})
+	assertTool(t, fake, res, http.MethodGet, "/v1/services/"+serviceID+"/health", "from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), "")
+	if textOf(t, res) != "1 health results" {
+		t.Fatalf("health text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "host_snapshot", map[string]any{"host_id": hostID})
+	assertTool(t, fake, res, http.MethodPost, "/v1/hosts/"+hostID+"/snapshot", "", "")
+	if fake.last().ContentType != "" {
+		t.Fatalf("snapshot content-type %q", fake.last().ContentType)
+	}
+	if !strings.Contains(textOf(t, res), "snapshot at 2026-10-13T00:00:00Z, cpu 12.5%") {
+		t.Fatalf("snapshot text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "probe_service", map[string]any{"service_id": serviceID, "check_id": checkID})
+	assertTool(t, fake, res, http.MethodPost, "/v1/services/"+serviceID+"/probe", "", `{"check_id":"`+checkID+`"}`)
+	if !strings.Contains(textOf(t, res), "probe up http:8080 (api) 7ms") {
+		t.Fatalf("probe text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "probe_service", map[string]any{
+		"service_id": serviceID, "protocol": "http", "port": 8080, "path": "/healthz",
+	})
+	assertTool(t, fake, res, http.MethodPost, "/v1/services/"+serviceID+"/probe", "", `{"protocol":"http","port":8080,"path":"/healthz"}`)
+	if res.IsError {
+		t.Fatalf("adhoc probe error %s", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "probe_service", map[string]any{
+		"service_id": serviceID, "protocol": "tcp", "port": 22,
+	})
+	assertTool(t, fake, res, http.MethodPost, "/v1/services/"+serviceID+"/probe", "", `{"protocol":"tcp","port":22,"path":null}`)
+
+	before := fake.count()
+	res = mustCall(t, cs, "list_hosts", map[string]any{"project_id": manyProjectID})
+	assertLast(t, fake, http.MethodGet, "/v1/projects/"+manyProjectID+"/hosts", "", "")
+	if fake.count() != before+1 {
+		t.Fatalf("truncation called api %d times", fake.count()-before)
+	}
+	text := textOf(t, res)
+	if !strings.Contains(text, "201 hosts") || !strings.Contains(text, "truncated to 200 items.") {
+		t.Fatalf("truncation text %q", text)
+	}
+	body := structuredMap(t, res)
+	assertKeptPrefix(t, body, "items", "item-")
+	assertKeptPrefix(t, body, "projects", "proj-")
+
+	if strings.Contains(logs.String(), userToken) {
+		t.Fatal("token appeared in logs")
+	}
+}
+
+func TestAPIForbidden(t *testing.T) {
+	fake := &fakeAPI{token: userToken, mode: "forbidden"}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	res := mustCall(t, cs, "list_projects", map[string]any{})
+	if !res.IsError {
+		t.Fatal("expected tool error")
+	}
+	if textOf(t, res) != "forbidden: not a member" {
+		t.Fatalf("text %q", textOf(t, res))
+	}
+	if fake.count() != 1 {
+		t.Fatalf("calls %d", fake.count())
+	}
+	if len(fake.last().Unexpected) != 0 {
+		t.Fatalf("unexpected headers %v", fake.last().Unexpected)
+	}
+	if strings.Contains(logs.String(), userToken) {
+		t.Fatal("token appeared in logs")
+	}
+}
+
+func TestAPIUnauthorizedIsToolError(t *testing.T) {
+	fake := &fakeAPI{token: userToken, mode: "unauthorized"}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, trips := connectMCP(t, mcpSrv, userToken)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_projects",
+		Arguments: map[string]any{},
+	})
+	var toolStatus int
+	for _, trip := range trips.snapshot() {
+		if strings.Contains(trip.body, "tools/call") {
+			toolStatus = trip.status
+		}
+	}
+	t.Logf("tools/call http status %d call error %v", toolStatus, err)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError || !strings.HasPrefix(textOf(t, res), "unauthorized:") {
+		t.Fatalf("result error=%v text %q", res.IsError, textOf(t, res))
+	}
+	if textOf(t, res) != "unauthorized: session expired" {
+		t.Fatalf("text %q", textOf(t, res))
+	}
+	if len(fake.last().Unexpected) != 0 {
+		t.Fatalf("unexpected headers %v", fake.last().Unexpected)
+	}
+	if toolStatus != http.StatusOK {
+		t.Fatalf("tools/call status %d", toolStatus)
+	}
+	if strings.Contains(logs.String(), userToken) {
+		t.Fatal("token appeared in logs")
+	}
+}
+
+func TestInputValidationSkipsAPI(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	// initialize/list must not have called the API.
+	if fake.count() != 0 {
+		t.Fatalf("api calls before tools %d", fake.count())
+	}
+	cases := []struct {
+		name string
+		tool string
+		args any
+	}{
+		{name: "bad uuid", tool: "list_hosts", args: map[string]any{"project_id": "not-a-uuid"}},
+		{name: "unknown field", tool: "list_hosts", args: map[string]any{"project_id": projectID, "extra": true}},
+		{name: "bad metric", tool: "query_metrics", args: map[string]any{"host_id": hostID, "metric": "load"}},
+		{name: "step low", tool: "query_metrics", args: map[string]any{"host_id": hostID, "metric": "cpu", "step": 9}},
+		{name: "step high", tool: "query_metrics", args: map[string]any{"host_id": hostID, "metric": "cpu", "step": 3601}},
+		{name: "from after to", tool: "query_metrics", args: map[string]any{
+			"host_id": hostID, "metric": "cpu", "from": "2026-10-02T00:00:00Z", "to": "2026-10-01T00:00:00Z",
+		}},
+		{name: "span over 31 days", tool: "query_metrics", args: map[string]any{
+			"host_id": hostID, "metric": "cpu", "from": "2026-01-01T00:00:00Z", "to": "2026-02-02T00:00:00Z",
+		}},
+		{name: "non utc", tool: "query_metrics", args: map[string]any{
+			"host_id": hostID, "metric": "cpu", "from": "2026-10-13T00:00:00+01:00",
+		}},
+		{name: "probe both", tool: "probe_service", args: map[string]any{
+			"service_id": serviceID, "check_id": checkID, "protocol": "http", "port": 80, "path": "/",
+		}},
+		{name: "http path missing", tool: "probe_service", args: map[string]any{
+			"service_id": serviceID, "protocol": "http", "port": 80,
+		}},
+		{name: "tcp path", tool: "probe_service", args: map[string]any{
+			"service_id": serviceID, "protocol": "tcp", "port": 22, "path": "/",
+		}},
+		{name: "process sort", tool: "list_processes", args: map[string]any{"host_id": hostID, "sort": "disk"}},
+		{name: "process limit low", tool: "list_processes", args: map[string]any{"host_id": hostID, "limit": 0}},
+		{name: "process limit high", tool: "list_processes", args: map[string]any{"host_id": hostID, "limit": 201}},
+		{name: "probe port low", tool: "probe_service", args: map[string]any{"service_id": serviceID, "protocol": "tcp", "port": 0}},
+		{name: "probe port high", tool: "probe_service", args: map[string]any{"service_id": serviceID, "protocol": "tcp", "port": 65536}},
+		{name: "probe protocol", tool: "probe_service", args: map[string]any{"service_id": serviceID, "protocol": "udp", "port": 22}},
+		{name: "health span", tool: "service_health_history", args: map[string]any{
+			"service_id": serviceID, "from": "2026-10-02T00:00:00Z", "to": "2026-10-01T00:00:00Z",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := fake.count()
+			res := mustCall(t, cs, tc.tool, tc.args)
+			if !res.IsError || !strings.HasPrefix(textOf(t, res), "bad_request:") {
+				t.Fatalf("result error=%v text %q", res.IsError, textOf(t, res))
+			}
+			if fake.count() != before {
+				t.Fatalf("api was called")
+			}
+		})
+	}
+}
+
+func TestConfigFrom(t *testing.T) {
+	env := map[string]string{
+		"BOT_MCP_LISTEN":        "127.0.0.1:8091",
+		"BOT_MCP_API_URL":       "https://api.example/base",
+		"BOT_MCP_PUBLIC_ORIGIN": "https://mcp.example",
+	}
+	cfg, err := configFrom(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIURL != "https://api.example/base" || cfg.Listen != "127.0.0.1:8091" {
+		t.Fatalf("cfg %+v", cfg)
+	}
+	env["BOT_MCP_API_URL"] = "https://user:pass@api.example"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("userinfo was accepted")
+	}
+	env["BOT_MCP_API_URL"] = "https://api.example"
+	env["BOT_MCP_PUBLIC_ORIGIN"] = "https://mcp.example/mcp"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("origin path was accepted")
+	}
+	env["BOT_MCP_PUBLIC_ORIGIN"] = "https://mcp.example"
+	env["BOT_MCP_API_URL"] = "http://example.com"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("cleartext api was accepted")
+	}
+	env["BOT_MCP_API_URL"] = "https://api.example"
+	env["BOT_MCP_PUBLIC_ORIGIN"] = "http://mcp.example"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("cleartext origin was accepted")
+	}
+	env["BOT_MCP_API_URL"] = "http://127.0.0.1:8080"
+	env["BOT_MCP_PUBLIC_ORIGIN"] = "http://localhost:8091"
+	if _, err := configFrom(func(k string) string { return env[k] }); err != nil {
+		t.Fatal(err)
+	}
+	env["BOT_MCP_PUBLIC_ORIGIN"] = "http://[::1]:8091"
+	if _, err := configFrom(func(k string) string { return env[k] }); err != nil {
+		t.Fatal(err)
+	}
+	env["BOT_MCP_API_URL"] = "http://example.com"
+	env["BOT_MCP_PUBLIC_ORIGIN"] = "http://mcp.example"
+	env["BOT_MCP_ALLOW_INSECURE_HTTP"] = "1"
+	if _, err := configFrom(func(k string) string { return env[k] }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type apiCall struct {
+	Method       string
+	Path         string
+	RawQuery     string
+	Auth         []string
+	Body         string
+	ContentType  string
+	Payload      json.RawMessage
+	Unexpected   []string
+	tokenInOther bool
+}
+
+type fakeAPI struct {
+	mu    sync.Mutex
+	calls []apiCall
+	token string
+	mode  string
+	base  string
+}
+
+func (f *fakeAPI) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakeAPI) last() apiCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[len(f.calls)-1]
+}
+
+func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	call := apiCall{
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		RawQuery:    r.URL.RawQuery,
+		Auth:        append([]string(nil), r.Header.Values("Authorization")...),
+		Body:        string(body),
+		ContentType: r.Header.Get("Content-Type"),
+		Unexpected:  unexpectedHeaders(r.Header, len(body) > 0),
+	}
+	if f.token != "" {
+		for key, values := range r.Header {
+			if strings.EqualFold(key, "Authorization") {
+				continue
+			}
+			for _, value := range values {
+				if strings.Contains(value, f.token) {
+					call.tokenInOther = true
+				}
+			}
+		}
+	}
+	status, code, msg, payload := f.reply(r)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	call.Payload = raw
+	f.mu.Lock()
+	f.calls = append(f.calls, call)
+	f.mu.Unlock()
+	writeEnvelope(w, status, code, msg, raw)
+}
+
+func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
+	f.mu.Lock()
+	mode := f.mode
+	f.mu.Unlock()
+	switch mode {
+	case "forbidden":
+		return http.StatusForbidden, "forbidden", "not a member", nil
+	case "unauthorized":
+		return http.StatusUnauthorized, "unauthorized", "session expired", nil
+	}
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
+		return http.StatusOK, "ok", "", map[string]any{
+			"user":       map[string]any{"id": "55555555-5555-4555-8555-555555555555", "email": "ada@example", "name": "Ada", "avatar_url": nil},
+			"identities": []any{map[string]any{"provider": "google", "email": "ada@example"}},
+			"projects": []any{map[string]any{
+				"id": projectID, "name": "lab", "slug": "lab", "role": "owner", "created_at": "2026-10-01T00:00:00Z",
+			}},
+		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+manyProjectID+"/hosts":
+		items := make([]any, 201)
+		projects := make([]any, 201)
+		for i := range items {
+			items[i] = map[string]any{"id": fmt.Sprintf("item-%03d", i), "name": fmt.Sprintf("h%d", i), "status": "online"}
+			projects[i] = map[string]any{"id": fmt.Sprintf("proj-%03d", i), "name": fmt.Sprintf("p%d", i)}
+		}
+		return http.StatusOK, "ok", "", map[string]any{"items": items, "projects": projects, "next_cursor": nil}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID+"/hosts":
+		return http.StatusOK, "ok", "", map[string]any{
+			"items":       []any{map[string]any{"id": hostID, "name": "pi1", "status": "online"}},
+			"next_cursor": nil,
+		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/services":
+		return http.StatusOK, "ok", "", map[string]any{
+			"items": []any{map[string]any{
+				"id": serviceID, "name": "api", "health": map[string]any{"status": "up"},
+			}},
+			"next_cursor": nil,
+		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/metrics":
+		return http.StatusOK, "ok", "", map[string]any{
+			"m": "cpu", "from": "2026-10-13T00:00:00Z", "to": "2026-10-13T01:00:00Z", "step": 60,
+			"series": []any{map[string]any{"name": "usage_percent", "unit": "%", "points": []any{[]any{"2026-10-13T00:00:00Z", 1.5}}}},
+		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/processes":
+		return http.StatusOK, "ok", "", map[string]any{
+			"sampled_at": "2026-10-13T00:00:00Z",
+			"items":      []any{map[string]any{"pid": 1, "process_name": "bot"}},
+		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/services/"+serviceID+"/health":
+		return http.StatusOK, "ok", "", map[string]any{
+			"items": []any{map[string]any{"t": "2026-10-13T00:00:00Z", "check_id": checkID, "result": "up", "http_status": 200, "latency_ms": 4}},
+		}
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/hosts/"+hostID+"/snapshot":
+		return http.StatusOK, "ok", "", map[string]any{
+			"sampled_at": "2026-10-13T00:00:00Z", "cpu_percent": 12.5,
+			"mem":   map[string]any{"total": 100, "used": 40, "available": 60, "used_percent": 40},
+			"disks": []any{}, "load": []any{0.1, 0.2, 0.3}, "temp_celsius": nil, "uptime_sec": 10, "top": []any{},
+		}
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/services/"+serviceID+"/probe":
+		return http.StatusOK, "ok", "", map[string]any{
+			"service": "api", "protocol": "http", "port": 8080, "path": "/health",
+			"result": "up", "http_status": 200, "latency_ms": 7, "checked_at": "2026-10-13T00:00:00Z",
+		}
+	default:
+		return http.StatusNotFound, "not_found", "no such route " + r.URL.Path, nil
+	}
+}
+
+func writeEnvelope(w http.ResponseWriter, status int, code, msg string, payload json.RawMessage) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		Code    string          `json:"code"`
+		Msg     string          `json:"msg"`
+		Payload json.RawMessage `json:"payload"`
+	}{Code: code, Msg: msg, Payload: payload})
+}
+
+func unexpectedHeaders(h http.Header, hasBody bool) []string {
+	var bad []string
+	for key := range h {
+		switch http.CanonicalHeaderKey(key) {
+		case "Authorization", "Accept", "User-Agent", "Accept-Encoding", "Content-Length":
+		case "Content-Type":
+			if !hasBody {
+				bad = append(bad, "Content-Type")
+			}
+		default:
+			bad = append(bad, key)
+		}
+	}
+	return bad
+}
+
+type safeBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *safeBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func newTestServer(t *testing.T, fake *fakeAPI) (*httptest.Server, *safeBuf) {
+	t.Helper()
+	apiSrv := httptest.NewServer(fake)
+	t.Cleanup(apiSrv.Close)
+	fake.base = apiSrv.URL
+	api, err := apiclient.New(apiSrv.URL, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &safeBuf{}
+	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(logger)
+	handler := newHandler(config{
+		Listen:       "127.0.0.1:0",
+		APIURL:       apiSrv.URL,
+		PublicOrigin: "https://mcp.example/",
+	}, api, logger)
+	mcpSrv := httptest.NewServer(handler)
+	t.Cleanup(mcpSrv.Close)
+	return mcpSrv, logs
+}
+
+type tripLog struct {
+	mu    sync.Mutex
+	trips []recordedTrip
+}
+
+type recordedTrip struct {
+	status int
+	body   string
+}
+
+func (l *tripLog) snapshot() []recordedTrip {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]recordedTrip(nil), l.trips...)
+}
+
+type authRT struct {
+	base  http.RoundTripper
+	token string
+	log   *tripLog
+}
+
+func (a *authRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		body, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	clone := req.Clone(req.Context())
+	clone.Body = io.NopCloser(bytes.NewReader(body))
+	if a.token != "" {
+		clone.Header.Set("Authorization", "Bearer "+a.token)
+	}
+	resp, err := a.base.RoundTrip(clone)
+	if resp != nil {
+		a.log.mu.Lock()
+		a.log.trips = append(a.log.trips, recordedTrip{status: resp.StatusCode, body: string(body)})
+		a.log.mu.Unlock()
+	}
+	return resp, err
+}
+
+func connectMCP(t *testing.T, mcpSrv *httptest.Server, token string) (*mcp.ClientSession, *tripLog) {
+	t.Helper()
+	log := &tripLog{}
+	client := mcp.NewClient(&mcp.Implementation{Name: "bot-mcp-server-test", Version: "0"}, nil)
+	cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             mcpSrv.URL + "/mcp",
+		HTTPClient:           &http.Client{Transport: &authRT{base: http.DefaultTransport, token: token, log: log}},
+		DisableStandaloneSSE: true,
+		MaxRetries:           -1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs, log
+}
+
+func mustCall(t *testing.T, cs *mcp.ClientSession, name string, args any) *mcp.CallToolResult {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("call %s: %v", name, err)
+	}
+	return res
+}
+
+func textOf(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if res == nil || len(res.Content) == 0 {
+		t.Fatal("empty tool result")
+	}
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content %T", res.Content[0])
+	}
+	return text.Text
+}
+
+func structuredMap(t *testing.T, res *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	m, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structured content %T", res.StructuredContent)
+	}
+	return m
+}
+
+func assertLast(t *testing.T, fake *fakeAPI, method, path, rawQuery, body string) {
+	t.Helper()
+	call := fake.last()
+	if call.Method != method || call.Path != path || call.RawQuery != rawQuery || call.Body != body {
+		t.Fatalf("api call method=%s path=%s query=%s body=%s", call.Method, call.Path, call.RawQuery, call.Body)
+	}
+	if len(call.Auth) != 1 || call.Auth[0] != "Bearer "+userToken {
+		t.Fatal("authorization was not the caller token")
+	}
+	if call.tokenInOther {
+		t.Fatal("token appeared outside Authorization")
+	}
+	if len(call.Unexpected) != 0 {
+		t.Fatalf("unexpected headers %v", call.Unexpected)
+	}
+}
+
+func assertTool(t *testing.T, fake *fakeAPI, res *mcp.CallToolResult, method, path, rawQuery, body string) {
+	t.Helper()
+	assertLast(t, fake, method, path, rawQuery, body)
+	assertPayload(t, res, fake.last().Payload)
+}
+
+func assertPayload(t *testing.T, res *mcp.CallToolResult, payload json.RawMessage) {
+	t.Helper()
+	if res.IsError {
+		t.Fatalf("tool error %s", textOf(t, res))
+	}
+	got, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded, want any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("structured content\n got %s\nwant %s", got, payload)
+	}
+}
+
+func assertKeptPrefix(t *testing.T, body map[string]any, key, prefix string) {
+	t.Helper()
+	items, ok := body[key].([]any)
+	if !ok || len(items) != 200 {
+		t.Fatalf("%s len %d ok=%v", key, len(items), ok)
+	}
+	for i, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("%s[%d] %T", key, i, item)
+		}
+		if row["id"] != fmt.Sprintf("%s%03d", prefix, i) {
+			t.Fatalf("%s[%d] id %v", key, i, row["id"])
+		}
+	}
+}
