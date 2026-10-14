@@ -47,8 +47,10 @@ func summarizeProjects(payload json.RawMessage) string {
 func summarizeHosts(payload json.RawMessage) string {
 	var body struct {
 		Items []struct {
-			Name   string `json:"name"`
-			Status string `json:"status"`
+			Name       string `json:"name"`
+			Status     string `json:"status"`
+			Relation   string `json:"relation"`
+			ShareLevel string `json:"share_level"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -56,7 +58,11 @@ func summarizeHosts(payload json.RawMessage) string {
 	}
 	parts := make([]string, 0, len(body.Items))
 	for _, h := range body.Items {
-		parts = append(parts, h.Name+" "+h.Status)
+		line := h.Name + " " + h.Status
+		if h.Relation == "shared" {
+			line += " (shared: " + h.ShareLevel + ")"
+		}
+		parts = append(parts, line)
 	}
 	return withPreview(fmt.Sprintf("%d hosts", len(body.Items)), parts)
 }

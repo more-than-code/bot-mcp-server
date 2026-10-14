@@ -26,7 +26,7 @@ const listProcessesSchema = `{
 func registerListProcesses(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_processes",
-		Description: "Read the latest stored process sample for a host (at most 90 seconds old). Optional sort is cpu (default) or memory. Optional limit is 1–200. Does not contact the host.",
+		Description: "Read the latest stored process sample for a host (at most 90 seconds old). Optional sort is cpu (default) or memory. Optional limit is 1–200. Shows every process on the host to any member who can see the host. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(listProcessesSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {

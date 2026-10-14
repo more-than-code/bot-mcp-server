@@ -21,7 +21,7 @@ const listServicesSchema = `{
 func registerListServices(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_services",
-		Description: "List services on a host. Reads stored service records, including the last known health status. Does not contact the host.",
+		Description: "List services on a host. Reads stored service records, including the last known health status. Results are limited to what the caller's projects may see. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(listServicesSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {

@@ -24,6 +24,7 @@ const (
 	projectID     = "11111111-1111-4111-8111-111111111111"
 	manyProjectID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	hostID        = "22222222-2222-4222-8222-222222222222"
+	sharedHostID  = "66666666-6666-4666-8666-666666666666"
 	serviceID     = "33333333-3333-4333-8333-333333333333"
 	checkID       = "44444444-4444-4444-8444-444444444444"
 	userToken     = "session-token.abc~def"
@@ -168,6 +169,14 @@ func TestTools(t *testing.T) {
 		if !openWorld[tool.Name] && !strings.Contains(tool.Description, "Does not contact") {
 			t.Errorf("%s description %q", tool.Name, tool.Description)
 		}
+		if tool.Name == "list_services" &&
+			!strings.Contains(tool.Description, "Results are limited to what the caller's projects may see.") {
+			t.Errorf("%s description %q", tool.Name, tool.Description)
+		}
+		if tool.Name == "list_processes" &&
+			!strings.Contains(tool.Description, "Shows every process on the host to any member who can see the host.") {
+			t.Errorf("%s description %q", tool.Name, tool.Description)
+		}
 	}
 	for _, name := range []string{
 		"list_projects", "list_hosts", "list_services", "query_metrics",
@@ -189,8 +198,20 @@ func TestTools(t *testing.T) {
 
 	res = mustCall(t, cs, "list_hosts", map[string]any{"project_id": projectID})
 	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/hosts", "", "")
-	if textOf(t, res) != "1 hosts: pi1 online" {
+	if textOf(t, res) != "2 hosts: pi1 online, pi2 online (shared: metrics)" {
 		t.Fatalf("list_hosts text %q", textOf(t, res))
+	}
+	hostItems, ok := structuredMap(t, res)["items"].([]any)
+	if !ok || len(hostItems) != 2 {
+		t.Fatalf("list_hosts items %#v", structuredMap(t, res)["items"])
+	}
+	owned, _ := hostItems[0].(map[string]any)
+	shared, _ := hostItems[1].(map[string]any)
+	if owned["id"] != hostID || owned["relation"] != "owner" || owned["share_level"] != nil {
+		t.Fatalf("owned host %#v", owned)
+	}
+	if shared["id"] != sharedHostID || shared["relation"] != "shared" || shared["share_level"] != "metrics" {
+		t.Fatalf("shared host %#v", shared)
 	}
 
 	res = mustCall(t, cs, "list_services", map[string]any{"host_id": hostID})
@@ -263,6 +284,23 @@ func TestTools(t *testing.T) {
 	assertKeptPrefix(t, body, "items", "item-")
 	assertKeptPrefix(t, body, "projects", "proj-")
 
+	if strings.Contains(logs.String(), userToken) {
+		t.Fatal("token appeared in logs")
+	}
+}
+
+func TestMetricsShareProcessesForbidden(t *testing.T) {
+	fake := &fakeAPI{token: userToken, mode: "metrics-share-processes"}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	res := mustCall(t, cs, "list_processes", map[string]any{"host_id": hostID})
+	if !res.IsError {
+		t.Fatal("expected tool error")
+	}
+	if textOf(t, res) != "forbidden: metrics share cannot list processes" {
+		t.Fatalf("text %q", textOf(t, res))
+	}
+	assertLast(t, fake, http.MethodGet, "/v1/hosts/"+hostID+"/processes", "", "")
 	if strings.Contains(logs.String(), userToken) {
 		t.Fatal("token appeared in logs")
 	}
@@ -509,6 +547,11 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 	switch mode {
 	case "forbidden":
 		return http.StatusForbidden, "forbidden", "not a member", nil
+	case "metrics-share-processes":
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/processes" {
+			return http.StatusForbidden, "forbidden", "metrics share cannot list processes", nil
+		}
+		return http.StatusNotFound, "not_found", "no such route " + r.URL.Path, nil
 	case "unauthorized":
 		return http.StatusUnauthorized, "unauthorized", "session expired", nil
 	}
@@ -531,7 +574,16 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 		return http.StatusOK, "ok", "", map[string]any{"items": items, "projects": projects, "next_cursor": nil}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID+"/hosts":
 		return http.StatusOK, "ok", "", map[string]any{
-			"items":       []any{map[string]any{"id": hostID, "name": "pi1", "status": "online"}},
+			"items": []any{
+				map[string]any{
+					"id": hostID, "name": "pi1", "status": "online",
+					"relation": "owner", "share_level": nil,
+				},
+				map[string]any{
+					"id": sharedHostID, "name": "pi2", "status": "online",
+					"relation": "shared", "share_level": "metrics",
+				},
+			},
 			"next_cursor": nil,
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/services":
