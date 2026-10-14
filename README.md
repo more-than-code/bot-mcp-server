@@ -19,7 +19,7 @@ go run ./cmd/bot-mcp-server
 
 `BOT_MCP_CLIENT_SECRET_FILE` is mode `0600`. The server reads the first line and refuses to start if the file is missing, empty, shorter than 32 characters, or not mode `0600`. That line is the secret for client id `bot-mcp-server`. It only allows exchanging a user token. It is never logged and never sent to `/v1/*`.
 
-`GET /health` is unauthenticated. `GET /.well-known/oauth-protected-resource` names the API origin as the authorization server and lists scope `deploybot`. `POST /mcp` requires `Authorization: Bearer <token>`. The server exchanges that token and calls the API with the delegated token only.
+`GET /health` is unauthenticated. `GET /.well-known/oauth-protected-resource` gives the resource `<BOT_MCP_PUBLIC_ORIGIN>/mcp` (the URL clients connect to; the API's `BOT_API_MCP_RESOURCE` must equal it), names the API origin as the authorization server, and lists scope `deploybot`. `POST /mcp` requires `Authorization: Bearer <token>`. The server exchanges that token and calls the API with the delegated token only.
 
 `BOT_MCP_API_URL` is an origin (`https://host[:port]`, optional trailing slash). A path, query, or fragment is refused at startup. `BOT_MCP_API_URL` and `BOT_MCP_PUBLIC_ORIGIN` must be `https`. Cleartext `http` is allowed only for `localhost`, `127.0.0.1`, and `::1`, or when `BOT_MCP_ALLOW_INSECURE_HTTP=1` (tailnet dev). The API client does not follow redirects.
 

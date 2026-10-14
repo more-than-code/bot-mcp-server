@@ -55,7 +55,7 @@ func TestProtectedResourceIssuerIsOrigin(t *testing.T) {
 	if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != "https://api.example:8443" {
 		t.Fatalf("authorization_servers %#v", doc.AuthorizationServers)
 	}
-	if doc.Resource != "https://mcp.example" {
+	if doc.Resource != "https://mcp.example/mcp" {
 		t.Fatalf("resource %q", doc.Resource)
 	}
 }

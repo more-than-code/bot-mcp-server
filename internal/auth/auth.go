@@ -136,12 +136,13 @@ type protectedResourceDoc struct {
 }
 
 // ProtectedResource serves the OAuth protected-resource metadata document.
-// publicOrigin is this MCP server. apiURL is bot-api-server. authorization_servers
-// is that URL's origin only (scheme, host, and port).
+// publicOrigin is this MCP server; resource is its /mcp endpoint, the canonical
+// server URI that MCP clients send as the OAuth resource. apiURL is bot-api-server.
+// authorization_servers is that URL's origin only (scheme, host, and port).
 func ProtectedResource(publicOrigin, apiURL string) http.Handler {
 	issuer, issuerErr := apiOrigin(apiURL)
 	doc := protectedResourceDoc{
-		Resource:               strings.TrimRight(publicOrigin, "/"),
+		Resource:               strings.TrimRight(publicOrigin, "/") + "/mcp",
 		AuthorizationServers:   []string{issuer},
 		BearerMethodsSupported: []string{"header"},
 		ScopesSupported:        []string{"deploybot"},

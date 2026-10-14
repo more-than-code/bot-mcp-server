@@ -128,7 +128,7 @@ func TestHealthAndProtectedResource(t *testing.T) {
 	if err := json.NewDecoder(meta.Body).Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Resource != "https://mcp.example" {
+	if doc.Resource != "https://mcp.example/mcp" {
 		t.Fatalf("resource %q", doc.Resource)
 	}
 	if len(doc.AuthorizationServers) != 1 || doc.AuthorizationServers[0] != fake.base {
