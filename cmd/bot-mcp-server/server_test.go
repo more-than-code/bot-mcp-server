@@ -169,9 +169,21 @@ func TestTools(t *testing.T) {
 		if !openWorld[tool.Name] && !strings.Contains(tool.Description, "Does not contact") {
 			t.Errorf("%s description %q", tool.Name, tool.Description)
 		}
-		if tool.Name == "list_services" &&
-			!strings.Contains(tool.Description, "Results are limited to what the caller's projects may see.") {
-			t.Errorf("%s description %q", tool.Name, tool.Description)
+		if tool.Name == "list_services" {
+			for _, phrase := range []string{
+				"host_id",
+				"project_id",
+				"paged",
+				"next_cursor",
+				"prev_cursor",
+				"total",
+				"limited to what that project may see",
+				"Results are limited to what the caller's projects may see.",
+			} {
+				if !strings.Contains(tool.Description, phrase) {
+					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+				}
+			}
 		}
 		if tool.Name == "list_processes" &&
 			!strings.Contains(tool.Description, "Shows every process on the host to any member who can see the host.") {
@@ -216,7 +228,7 @@ func TestTools(t *testing.T) {
 
 	res = mustCall(t, cs, "list_services", map[string]any{"host_id": hostID})
 	assertTool(t, fake, res, http.MethodGet, "/v1/hosts/"+hostID+"/services", "", "")
-	if !strings.Contains(textOf(t, res), "1 services: api up") {
+	if textOf(t, res) != "1 services\napi up" {
 		t.Fatalf("list_services text %q", textOf(t, res))
 	}
 
@@ -287,6 +299,112 @@ func TestTools(t *testing.T) {
 	if strings.Contains(logs.String(), userToken) {
 		t.Fatal("token appeared in logs")
 	}
+}
+
+func TestListServicesProject(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+
+	res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID})
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "", "")
+	if textOf(t, res) != "5 services, more pages\nport 8080 · ada up pi1\nCache down pi2" {
+		t.Fatalf("text %q", textOf(t, res))
+	}
+
+	q := "a b&100%"
+	cursor := "x/y"
+	res = mustCall(t, cs, "list_services", map[string]any{
+		"project_id": projectID,
+		"q":          q,
+		"sort":       "last_seen",
+		"dir":        "desc",
+		"limit":      200,
+		"cursor":     cursor,
+	})
+	wantQuery := "cursor=" + url.QueryEscape(cursor) + "&dir=desc&limit=200&q=" + url.QueryEscape(q) + "&sort=last_seen"
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", wantQuery, "")
+
+	q = strings.Repeat("é", 100)
+	res = mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "q": q, "limit": 1})
+	wantQuery = "limit=1&q=" + url.QueryEscape(q)
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", wantQuery, "")
+
+	res = mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "q": ""})
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "q=", "")
+
+	if strings.Contains(logs.String(), userToken) {
+		t.Fatal("token appeared in logs")
+	}
+}
+
+func TestListServicesSortDir(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	for _, sort := range []string{"name", "host", "kind", "status", "last_seen"} {
+		t.Run("sort "+sort, func(t *testing.T) {
+			res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "sort": sort})
+			assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "sort="+sort, "")
+		})
+	}
+	for _, dir := range []string{"asc", "desc"} {
+		t.Run("dir "+dir, func(t *testing.T) {
+			res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "dir": dir})
+			assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "dir="+dir, "")
+		})
+	}
+	t.Run("bad sort", func(t *testing.T) {
+		before := fake.count()
+		res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "sort": "cpu"})
+		if !res.IsError || textOf(t, res) != "bad_request: sort must be name, host, kind, status, or last_seen" {
+			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+		}
+		if fake.count() != before {
+			t.Fatal("api was called")
+		}
+	})
+	t.Run("bad dir", func(t *testing.T) {
+		before := fake.count()
+		res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "dir": "up"})
+		if !res.IsError || textOf(t, res) != "bad_request: dir must be asc or desc" {
+			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+		}
+		if fake.count() != before {
+			t.Fatal("api was called")
+		}
+	})
+}
+
+func TestListServicesAPIError(t *testing.T) {
+	t.Run("forbidden", func(t *testing.T) {
+		fake := &fakeAPI{token: userToken, mode: "forbidden"}
+		mcpSrv, logs := newTestServer(t, fake)
+		cs, _ := connectMCP(t, mcpSrv, userToken)
+		res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID})
+		if !res.IsError || textOf(t, res) != "forbidden: not a member" {
+			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+		}
+		assertLast(t, fake, http.MethodGet, "/v1/projects/"+projectID+"/services", "", "")
+		if strings.Contains(logs.String(), userToken) {
+			t.Fatal("token appeared in logs")
+		}
+	})
+	t.Run("not found", func(t *testing.T) {
+		fake := &fakeAPI{token: userToken}
+		mcpSrv, logs := newTestServer(t, fake)
+		cs, _ := connectMCP(t, mcpSrv, userToken)
+		missing := "99999999-9999-4999-8999-999999999999"
+		res := mustCall(t, cs, "list_services", map[string]any{"project_id": missing})
+		want := "not_found: no such route /v1/projects/" + missing + "/services"
+		if !res.IsError || textOf(t, res) != want {
+			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+		}
+		assertLast(t, fake, http.MethodGet, "/v1/projects/"+missing+"/services", "", "")
+		if strings.Contains(logs.String(), userToken) {
+			t.Fatal("token appeared in logs")
+		}
+	})
 }
 
 func TestMetricsShareProcessesForbidden(t *testing.T) {
@@ -408,6 +526,22 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 		{name: "health span", tool: "service_health_history", args: map[string]any{
 			"service_id": serviceID, "from": "2026-10-02T00:00:00Z", "to": "2026-10-01T00:00:00Z",
 		}},
+		{name: "services neither", tool: "list_services", args: map[string]any{}},
+		{name: "services both", tool: "list_services", args: map[string]any{"host_id": hostID, "project_id": projectID}},
+		{name: "services bad host", tool: "list_services", args: map[string]any{"host_id": "not-a-uuid"}},
+		{name: "services bad project", tool: "list_services", args: map[string]any{"project_id": "not-a-uuid"}},
+		{name: "services empty project", tool: "list_services", args: map[string]any{"project_id": ""}},
+		{name: "services host q", tool: "list_services", args: map[string]any{"host_id": hostID, "q": "api"}},
+		{name: "services host sort", tool: "list_services", args: map[string]any{"host_id": hostID, "sort": "name"}},
+		{name: "services host dir", tool: "list_services", args: map[string]any{"host_id": hostID, "dir": "asc"}},
+		{name: "services host limit", tool: "list_services", args: map[string]any{"host_id": hostID, "limit": 10}},
+		{name: "services host cursor", tool: "list_services", args: map[string]any{"host_id": hostID, "cursor": "x"}},
+		{name: "services sort", tool: "list_services", args: map[string]any{"project_id": projectID, "sort": "cpu"}},
+		{name: "services dir", tool: "list_services", args: map[string]any{"project_id": projectID, "dir": "up"}},
+		{name: "services limit low", tool: "list_services", args: map[string]any{"project_id": projectID, "limit": 0}},
+		{name: "services limit high", tool: "list_services", args: map[string]any{"project_id": projectID, "limit": 201}},
+		{name: "services q long", tool: "list_services", args: map[string]any{"project_id": projectID, "q": strings.Repeat("a", 101)}},
+		{name: "services q long runes", tool: "list_services", args: map[string]any{"project_id": projectID, "q": strings.Repeat("é", 101)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -592,6 +726,28 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 				"id": serviceID, "name": "api", "health": map[string]any{"status": "up"},
 			}},
 			"next_cursor": nil,
+		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID+"/services":
+		return http.StatusOK, "ok", "", map[string]any{
+			"items": []any{
+				map[string]any{
+					"id": serviceID, "name": "port-8080", "display_name": nil, "owner_user": "ada",
+					"health":       map[string]any{"status": "up"},
+					"host_name":    "pi1",
+					"host_status":  "online",
+					"project_name": "lab",
+				},
+				map[string]any{
+					"id": "77777777-7777-4777-8777-777777777777", "name": "redis", "display_name": "Cache", "owner_user": nil,
+					"health":       map[string]any{"status": "down"},
+					"host_name":    "pi2",
+					"host_status":  "online",
+					"project_name": "lab",
+				},
+			},
+			"next_cursor": "next/1",
+			"prev_cursor": nil,
+			"total":       5,
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/metrics":
 		return http.StatusOK, "ok", "", map[string]any{

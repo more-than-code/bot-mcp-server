@@ -3,10 +3,32 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 )
 
 const previewCount = 8
+
+// summaryFieldRunes is the longest single field placed in a summary line.
+const summaryFieldRunes = 80
+
+// summaryField replaces controls, format characters, and line or paragraph
+// separators with U+FFFD, then caps the result at summaryFieldRunes.
+// That keeps bidi overrides and Unicode line breaks out of a summary line.
+func summaryField(s string) string {
+	runes := make([]rune, 0, len(s))
+	for _, r := range s {
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
+			r = '\uFFFD'
+		}
+		runes = append(runes, r)
+	}
+	if len(runes) <= summaryFieldRunes {
+		return string(runes)
+	}
+	return string(runes[:summaryFieldRunes-1]) + "…"
+}
 
 func withPreview(head string, parts []string) string {
 	shown := preview(parts)
@@ -39,7 +61,7 @@ func summarizeProjects(payload json.RawMessage) string {
 	}
 	parts := make([]string, 0, len(body.Projects))
 	for _, p := range body.Projects {
-		parts = append(parts, p.Name+" ("+p.Role+")")
+		parts = append(parts, summaryField(p.Name)+" ("+summaryField(p.Role)+")")
 	}
 	return withPreview(fmt.Sprintf("%d projects", len(body.Projects)), parts)
 }
@@ -58,36 +80,82 @@ func summarizeHosts(payload json.RawMessage) string {
 	}
 	parts := make([]string, 0, len(body.Items))
 	for _, h := range body.Items {
-		line := h.Name + " " + h.Status
+		line := summaryField(h.Name) + " " + summaryField(h.Status)
 		if h.Relation == "shared" {
-			line += " (shared: " + h.ShareLevel + ")"
+			line += " (shared: " + summaryField(h.ShareLevel) + ")"
 		}
 		parts = append(parts, line)
 	}
 	return withPreview(fmt.Sprintf("%d hosts", len(body.Items)), parts)
 }
 
-func summarizeServices(payload json.RawMessage) string {
+// portServiceName is the discovered name the v1.2 label rewrites.
+var portServiceName = regexp.MustCompile(`^port-(\d+)$`)
+
+// serviceLabel applies the v1.2 rule: display_name, else name, unless name
+// is port-<n>, which becomes "port <n> · <owner_user>" (or "port <n>").
+func serviceLabel(displayName, name, ownerUser string) string {
+	if displayName != "" {
+		return summaryField(displayName)
+	}
+	m := portServiceName.FindStringSubmatch(name)
+	if m == nil {
+		return summaryField(name)
+	}
+	if ownerUser == "" {
+		return "port " + summaryField(m[1])
+	}
+	return "port " + summaryField(m[1]) + " · " + summaryField(ownerUser)
+}
+
+func summarizeServices(payload json.RawMessage, project bool) string {
 	var body struct {
 		Items []struct {
-			Name   string `json:"name"`
-			Health struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"display_name"`
+			OwnerUser   string `json:"owner_user"`
+			HostName    string `json:"host_name"`
+			Health      struct {
 				Status string `json:"status"`
 			} `json:"health"`
 		} `json:"items"`
+		NextCursor *string `json:"next_cursor"`
+		Total      *int    `json:"total"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return "services"
 	}
-	parts := make([]string, 0, len(body.Items))
-	for _, s := range body.Items {
-		status := s.Health.Status
+	n := len(body.Items)
+	if project && body.Total != nil {
+		n = *body.Total
+	}
+	head := fmt.Sprintf("%d services", n)
+	if project {
+		if body.NextCursor != nil && *body.NextCursor != "" {
+			head += ", more pages"
+		} else {
+			head += ", no more pages"
+		}
+	}
+	items := body.Items
+	if len(items) > maxListItems {
+		items = items[:maxListItems]
+	}
+	lines := make([]string, 0, len(items)+1)
+	lines = append(lines, head)
+	for _, s := range items {
+		status := summaryField(s.Health.Status)
 		if status == "" {
 			status = "unknown"
 		}
-		parts = append(parts, s.Name+" "+status)
+		line := serviceLabel(s.DisplayName, s.Name, s.OwnerUser) + " " + status
+		host := summaryField(s.HostName)
+		if project && host != "" {
+			line += " " + host
+		}
+		lines = append(lines, line)
 	}
-	return withPreview(fmt.Sprintf("%d services", len(body.Items)), parts)
+	return strings.Join(lines, "\n")
 }
 
 func summarizeMetrics(metric string, payload json.RawMessage) string {
@@ -101,7 +169,7 @@ func summarizeMetrics(metric string, payload json.RawMessage) string {
 	for _, s := range body.Series {
 		points += len(s.Points)
 	}
-	return fmt.Sprintf("%s: %d series, %d points", metric, len(body.Series), points)
+	return fmt.Sprintf("%s: %d series, %d points", summaryField(metric), len(body.Series), points)
 }
 
 func summarizeProcesses(payload json.RawMessage) string {
@@ -114,11 +182,11 @@ func summarizeProcesses(payload json.RawMessage) string {
 	_ = json.Unmarshal(payload, &body)
 	names := make([]string, 0, len(body.Items))
 	for _, item := range body.Items {
-		names = append(names, item.ProcessName)
+		names = append(names, summaryField(item.ProcessName))
 	}
 	head := fmt.Sprintf("%d processes", len(body.Items))
 	if body.SampledAt != "" {
-		head += " at " + body.SampledAt
+		head += " at " + summaryField(body.SampledAt)
 	}
 	return withPreview(head, names)
 }
@@ -139,7 +207,7 @@ func summarizeSnapshot(payload json.RawMessage) string {
 	if err := json.Unmarshal(payload, &body); err != nil || body.SampledAt == "" {
 		return "host snapshot"
 	}
-	return fmt.Sprintf("snapshot at %s, cpu %.4g%%", body.SampledAt, body.CPUPercent)
+	return fmt.Sprintf("snapshot at %s, cpu %.4g%%", summaryField(body.SampledAt), body.CPUPercent)
 }
 
 func summarizeProbe(payload json.RawMessage) string {
@@ -153,5 +221,5 @@ func summarizeProbe(payload json.RawMessage) string {
 	if err := json.Unmarshal(payload, &body); err != nil || body.Result == "" {
 		return "probe result"
 	}
-	return fmt.Sprintf("probe %s %s:%d (%s) %dms", body.Result, body.Protocol, body.Port, body.Service, body.LatencyMS)
+	return fmt.Sprintf("probe %s %s:%d (%s) %dms", summaryField(body.Result), summaryField(body.Protocol), body.Port, summaryField(body.Service), body.LatencyMS)
 }

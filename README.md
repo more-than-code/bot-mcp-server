@@ -22,7 +22,7 @@ go run ./cmd/bot-mcp-server
 
 Phase 1 tools are read-only: `list_projects`, `list_hosts`, `list_services`, `query_metrics`, `list_processes`, `service_health_history`, `host_snapshot`, `probe_service`. `host_snapshot` and `probe_service` contact the host when they are called.
 
-`list_hosts` includes hosts shared with the project (`relation` and `share_level` pass through; a shared host is summarized as `pi1 online (shared: metrics)`). `list_services` is filtered per project. `list_processes` shows the whole host.
+`list_hosts` includes hosts shared with the project (`relation` and `share_level` pass through; a shared host is summarized as `pi1 online (shared: metrics)`). `list_services` takes `host_id` or `project_id`; with `project_id` the query (`q`, `sort`, `dir`, `limit`, `cursor`) is passed through and the result is paged and limited to what that project may see. `list_processes` shows the whole host.
 
 ## deploybot
 
