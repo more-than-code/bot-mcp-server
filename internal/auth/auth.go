@@ -1,5 +1,6 @@
-// Package auth extracts the caller's Bearer token for one MCP request.
-// The token is kept only in the request context. It is never logged here.
+// Package auth authenticates one MCP request.
+// The caller's bearer token is exchanged for a delegated API token. Only the
+// delegated token is placed on the request context. Neither token is logged.
 package auth
 
 import (
@@ -10,26 +11,42 @@ import (
 	"unicode"
 )
 
-type contextKey struct{}
+type delegatedTokenKey struct{}
+type rejectKey struct{}
 
 // MaxTokenBytes is the longest Bearer token this server will accept.
 // Session tokens are opaque and short; the cap stops a huge header from
-// being copied into the API call.
+// being copied into an exchange or an API call.
 const MaxTokenBytes = 4096
 
-// WithToken returns a context that carries token.
-func WithToken(ctx context.Context, token string) context.Context {
-	return context.WithValue(ctx, contextKey{}, token)
+// WithDelegatedToken returns a context that carries the delegated API token.
+// onReject, when set, is called if that token is rejected by the API.
+// The caller's own token is not stored.
+func WithDelegatedToken(ctx context.Context, token string, onReject func()) context.Context {
+	ctx = context.WithValue(ctx, delegatedTokenKey{}, token)
+	if onReject != nil {
+		ctx = context.WithValue(ctx, rejectKey{}, onReject)
+	}
+	return ctx
 }
 
-// TokenFromContext returns the Bearer token stored by RequireBearer.
-// The boolean is false when the context has no token.
-func TokenFromContext(ctx context.Context) (string, bool) {
-	token, ok := ctx.Value(contextKey{}).(string)
+// DelegatedFromContext returns the delegated API token for this request.
+// The boolean is false when the context has no delegated token.
+func DelegatedFromContext(ctx context.Context) (string, bool) {
+	token, ok := ctx.Value(delegatedTokenKey{}).(string)
 	if !ok || token == "" {
 		return "", false
 	}
 	return token, true
+}
+
+// NoteRejected drops the cached delegated token after the API rejects it.
+// It does nothing when the context has no exchange cache.
+func NoteRejected(ctx context.Context) {
+	fn, _ := ctx.Value(rejectKey{}).(func())
+	if fn != nil {
+		fn()
+	}
 }
 
 // ParseBearer returns the token from an Authorization header value.
@@ -65,52 +82,75 @@ func ValidToken(token string) bool {
 	return true
 }
 
-// WWWAuthenticate is the challenge for a missing or invalid token.
-func WWWAuthenticate(publicOrigin string) string {
+func resourceMetadata(publicOrigin string) string {
 	origin := strings.TrimRight(publicOrigin, "/")
-	return `Bearer resource_metadata="` + origin + `/.well-known/oauth-protected-resource"`
+	return origin + "/.well-known/oauth-protected-resource"
 }
 
-// WriteUnauthorized writes the 401 challenge. It does not echo the header.
-func WriteUnauthorized(w http.ResponseWriter, publicOrigin string) {
-	w.Header().Set("WWW-Authenticate", WWWAuthenticate(publicOrigin))
+// WWWAuthenticate is the challenge for a missing bearer token.
+func WWWAuthenticate(publicOrigin string) string {
+	return `Bearer resource_metadata="` + resourceMetadata(publicOrigin) + `"`
+}
+
+// WWWAuthenticateInvalidToken is the challenge for a rejected caller token.
+func WWWAuthenticateInvalidToken(publicOrigin string) string {
+	return `Bearer error="invalid_token", resource_metadata="` + resourceMetadata(publicOrigin) + `"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusUnauthorized)
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"code": "unauthorized",
-		"msg":  "missing or invalid bearer token",
+		"code": code,
+		"msg":  msg,
 	})
 }
 
-// RequireBearer rejects requests that lack a Bearer token before next runs.
-func RequireBearer(publicOrigin string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := ParseBearer(r.Header.Get("Authorization"))
-		if !ok {
-			WriteUnauthorized(w, publicOrigin)
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(WithToken(r.Context(), token)))
-	})
+// WriteUnauthorized writes the 401 challenge for a missing bearer token.
+// It does not echo the header that was sent.
+func WriteUnauthorized(w http.ResponseWriter, publicOrigin string) {
+	w.Header().Set("WWW-Authenticate", WWWAuthenticate(publicOrigin))
+	writeJSON(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
+}
+
+// WriteInvalidToken writes the 401 challenge for a caller token the
+// authorization server refused to exchange.
+func WriteInvalidToken(w http.ResponseWriter, publicOrigin string) {
+	w.Header().Set("WWW-Authenticate", WWWAuthenticateInvalidToken(publicOrigin))
+	writeJSON(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+}
+
+// WriteUnavailable writes 503 when the authorization server cannot be reached.
+// There is no WWW-Authenticate challenge, so a client keeps its token.
+func WriteUnavailable(w http.ResponseWriter) {
+	writeJSON(w, http.StatusServiceUnavailable, "unavailable", "authorization server unavailable")
 }
 
 type protectedResourceDoc struct {
 	Resource               string   `json:"resource"`
 	AuthorizationServers   []string `json:"authorization_servers"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported"`
+	ScopesSupported        []string `json:"scopes_supported"`
 }
 
 // ProtectedResource serves the OAuth protected-resource metadata document.
-// publicOrigin is this MCP server. apiURL is bot-api-server, the authorization server.
+// publicOrigin is this MCP server. apiURL is bot-api-server. authorization_servers
+// is that URL's origin only (scheme, host, and port).
 func ProtectedResource(publicOrigin, apiURL string) http.Handler {
+	issuer, issuerErr := apiOrigin(apiURL)
 	doc := protectedResourceDoc{
 		Resource:               strings.TrimRight(publicOrigin, "/"),
-		AuthorizationServers:   []string{strings.TrimRight(apiURL, "/")},
+		AuthorizationServers:   []string{issuer},
 		BearerMethodsSupported: []string{"header"},
+		ScopesSupported:        []string{"deploybot"},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if issuerErr != nil {
+			http.Error(w, "misconfigured authorization server", http.StatusInternalServerError)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -1,5 +1,5 @@
 // Package tools registers the phase 1 MCP tools. Each tool reads through
-// bot-api-server with the caller's Bearer token and does not write.
+// bot-api-server with the delegated token for this request and does not write.
 package tools
 
 import (
@@ -94,15 +94,20 @@ func fromAPI(err error) *mcp.CallToolResult {
 	return toolError("error", "api request failed")
 }
 
-// call sends one API request with the token from ctx. It never calls the
-// API without that token.
+// call sends one API request with the delegated token from ctx.
+// It never sends the caller's token. A 401 drops that delegated token from
+// the exchange cache so the next request exchanges again.
 func call(ctx context.Context, api *apiclient.Client, method, path string, query url.Values, body any) (json.RawMessage, *mcp.CallToolResult) {
-	token, ok := auth.TokenFromContext(ctx)
+	token, ok := auth.DelegatedFromContext(ctx)
 	if !ok {
 		return nil, toolError("unauthorized", "missing bearer token")
 	}
 	payload, err := api.Do(ctx, token, method, path, query, body)
 	if err != nil {
+		var apiErr *apiclient.Error
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+			auth.NoteRejected(ctx)
+		}
 		return nil, fromAPI(err)
 	}
 	return payload, nil

@@ -26,9 +26,14 @@ func main() {
 		logger.Error("config", "err", err)
 		os.Exit(1)
 	}
+	handler, err := newHandler(cfg, api, logger)
+	if err != nil {
+		logger.Error("config", "err", err)
+		os.Exit(1)
+	}
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           newHandler(cfg, api, logger),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		// WriteTimeout covers handler time, including the 35s API client timeout.
@@ -44,11 +49,16 @@ func main() {
 }
 
 // newHandler serves health, protected-resource metadata, and the MCP endpoint.
-// The MCP handler is stateless: the SDK accepts protocol 2026-07-28 only in
-// that mode, and this server keeps no session of its own.
-func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) http.Handler {
+// /mcp exchanges the caller token before any MCP handling. The MCP handler is
+// stateless: the SDK accepts protocol 2026-07-28 only in that mode, and this
+// server keeps no session of its own.
+func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Handler, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
+	}
+	exchanger, err := auth.NewExchanger(cfg.APIURL, cfg.ClientSecret, logger)
+	if err != nil {
+		return nil, err
 	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "bot-mcp-server",
@@ -73,6 +83,6 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) http.Han
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("GET /.well-known/oauth-protected-resource", auth.ProtectedResource(cfg.PublicOrigin, cfg.APIURL))
-	mux.Handle("/mcp", auth.RequireBearer(cfg.PublicOrigin, mcpHandler))
-	return mux
+	mux.Handle("/mcp", exchanger.RequireDelegated(cfg.PublicOrigin, mcpHandler))
+	return mux, nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -21,13 +24,15 @@ import (
 )
 
 const (
-	projectID     = "11111111-1111-4111-8111-111111111111"
-	manyProjectID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	hostID        = "22222222-2222-4222-8222-222222222222"
-	sharedHostID  = "66666666-6666-4666-8666-666666666666"
-	serviceID     = "33333333-3333-4333-8333-333333333333"
-	checkID       = "44444444-4444-4444-8444-444444444444"
-	userToken     = "session-token.abc~def"
+	projectID      = "11111111-1111-4111-8111-111111111111"
+	manyProjectID  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	hostID         = "22222222-2222-4222-8222-222222222222"
+	sharedHostID   = "66666666-6666-4666-8666-666666666666"
+	serviceID      = "33333333-3333-4333-8333-333333333333"
+	checkID        = "44444444-4444-4444-8444-444444444444"
+	userToken      = "session-token.abc~def"
+	delegatedToken = "delegated-token.xyz~123"
+	clientSecret   = "mcp-client-secret"
 )
 
 func TestMissingAndInvalidToken(t *testing.T) {
@@ -118,6 +123,7 @@ func TestHealthAndProtectedResource(t *testing.T) {
 		Resource               string   `json:"resource"`
 		AuthorizationServers   []string `json:"authorization_servers"`
 		BearerMethodsSupported []string `json:"bearer_methods_supported"`
+		ScopesSupported        []string `json:"scopes_supported"`
 	}
 	if err := json.NewDecoder(meta.Body).Decode(&doc); err != nil {
 		t.Fatal(err)
@@ -130,6 +136,9 @@ func TestHealthAndProtectedResource(t *testing.T) {
 	}
 	if len(doc.BearerMethodsSupported) != 1 || doc.BearerMethodsSupported[0] != "header" {
 		t.Fatalf("bearer_methods %#v", doc.BearerMethodsSupported)
+	}
+	if len(doc.ScopesSupported) != 1 || doc.ScopesSupported[0] != "deploybot" {
+		t.Fatalf("scopes_supported %#v", doc.ScopesSupported)
 	}
 	if fake.count() != 0 {
 		t.Fatalf("unauthenticated routes called the api %d times", fake.count())
@@ -296,8 +305,8 @@ func TestTools(t *testing.T) {
 	assertKeptPrefix(t, body, "items", "item-")
 	assertKeptPrefix(t, body, "projects", "proj-")
 
-	if strings.Contains(logs.String(), userToken) {
-		t.Fatal("token appeared in logs")
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
 	}
 }
 
@@ -333,8 +342,8 @@ func TestListServicesProject(t *testing.T) {
 	res = mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "q": ""})
 	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "q=", "")
 
-	if strings.Contains(logs.String(), userToken) {
-		t.Fatal("token appeared in logs")
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
 	}
 }
 
@@ -386,8 +395,8 @@ func TestListServicesAPIError(t *testing.T) {
 			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
 		}
 		assertLast(t, fake, http.MethodGet, "/v1/projects/"+projectID+"/services", "", "")
-		if strings.Contains(logs.String(), userToken) {
-			t.Fatal("token appeared in logs")
+		if logsContainSecret(logs.String()) {
+			t.Fatal("secret material appeared in logs")
 		}
 	})
 	t.Run("not found", func(t *testing.T) {
@@ -401,8 +410,8 @@ func TestListServicesAPIError(t *testing.T) {
 			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
 		}
 		assertLast(t, fake, http.MethodGet, "/v1/projects/"+missing+"/services", "", "")
-		if strings.Contains(logs.String(), userToken) {
-			t.Fatal("token appeared in logs")
+		if logsContainSecret(logs.String()) {
+			t.Fatal("secret material appeared in logs")
 		}
 	})
 }
@@ -419,8 +428,8 @@ func TestMetricsShareProcessesForbidden(t *testing.T) {
 		t.Fatalf("text %q", textOf(t, res))
 	}
 	assertLast(t, fake, http.MethodGet, "/v1/hosts/"+hostID+"/processes", "", "")
-	if strings.Contains(logs.String(), userToken) {
-		t.Fatal("token appeared in logs")
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
 	}
 }
 
@@ -435,14 +444,14 @@ func TestAPIForbidden(t *testing.T) {
 	if textOf(t, res) != "forbidden: not a member" {
 		t.Fatalf("text %q", textOf(t, res))
 	}
-	if fake.count() != 1 {
-		t.Fatalf("calls %d", fake.count())
+	if fake.v1Count() != 1 {
+		t.Fatalf("v1 calls %d", fake.v1Count())
 	}
 	if len(fake.last().Unexpected) != 0 {
 		t.Fatalf("unexpected headers %v", fake.last().Unexpected)
 	}
-	if strings.Contains(logs.String(), userToken) {
-		t.Fatal("token appeared in logs")
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
 	}
 }
 
@@ -476,8 +485,8 @@ func TestAPIUnauthorizedIsToolError(t *testing.T) {
 	if toolStatus != http.StatusOK {
 		t.Fatalf("tools/call status %d", toolStatus)
 	}
-	if strings.Contains(logs.String(), userToken) {
-		t.Fatal("token appeared in logs")
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
 	}
 }
 
@@ -485,9 +494,9 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 	fake := &fakeAPI{token: userToken}
 	mcpSrv, _ := newTestServer(t, fake)
 	cs, _ := connectMCP(t, mcpSrv, userToken)
-	// initialize/list must not have called the API.
-	if fake.count() != 0 {
-		t.Fatalf("api calls before tools %d", fake.count())
+	// initialize must not have called /v1. The exchange is not a v1 call.
+	if fake.v1Count() != 0 {
+		t.Fatalf("v1 calls before tools %d", fake.v1Count())
 	}
 	cases := []struct {
 		name string
@@ -558,17 +567,42 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 }
 
 func TestConfigFrom(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "client-secret")
+	const secretLine = "0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(secretPath, []byte(secretLine+"\nnope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(secretPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	env := map[string]string{
-		"BOT_MCP_LISTEN":        "127.0.0.1:8091",
-		"BOT_MCP_API_URL":       "https://api.example/base",
-		"BOT_MCP_PUBLIC_ORIGIN": "https://mcp.example",
+		"BOT_MCP_LISTEN":             "127.0.0.1:8091",
+		"BOT_MCP_API_URL":            "https://api.example",
+		"BOT_MCP_PUBLIC_ORIGIN":      "https://mcp.example",
+		"BOT_MCP_CLIENT_SECRET_FILE": secretPath,
 	}
 	cfg, err := configFrom(func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.APIURL != "https://api.example/base" || cfg.Listen != "127.0.0.1:8091" {
-		t.Fatalf("cfg %+v", cfg)
+	if cfg.APIURL != "https://api.example" || cfg.Listen != "127.0.0.1:8091" || cfg.ClientSecret != secretLine {
+		t.Fatalf("listen %s api %s secret-ok %v", cfg.Listen, cfg.APIURL, cfg.ClientSecret == secretLine)
+	}
+	env["BOT_MCP_API_URL"] = "https://api.example/base"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("api path was accepted")
+	}
+	env["BOT_MCP_API_URL"] = "https://api.example/"
+	if _, err := configFrom(func(k string) string { return env[k] }); err != nil {
+		t.Fatal(err)
+	}
+	env["BOT_MCP_API_URL"] = "https://api.example?q=1"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("api query was accepted")
+	}
+	env["BOT_MCP_API_URL"] = "https://api.example#frag"
+	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("api fragment was accepted")
 	}
 	env["BOT_MCP_API_URL"] = "https://user:pass@api.example"
 	if _, err := configFrom(func(k string) string { return env[k] }); err == nil {
@@ -606,6 +640,311 @@ func TestConfigFrom(t *testing.T) {
 	}
 }
 
+func TestClientSecretFile(t *testing.T) {
+	dir := t.TempDir()
+	base := func(path string) map[string]string {
+		return map[string]string{
+			"BOT_MCP_LISTEN":             "127.0.0.1:8091",
+			"BOT_MCP_API_URL":            "https://api.example",
+			"BOT_MCP_PUBLIC_ORIGIN":      "https://mcp.example",
+			"BOT_MCP_CLIENT_SECRET_FILE": path,
+		}
+	}
+	load := func(path string) error {
+		env := base(path)
+		_, err := configFrom(func(k string) string { return env[k] })
+		return err
+	}
+	t.Run("missing", func(t *testing.T) {
+		err := load(filepath.Join(dir, "absent"))
+		if err == nil || !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		err := load("")
+		if err == nil || !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		path := filepath.Join(dir, "empty")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := load(path)
+		if err == nil || !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("newline only", func(t *testing.T) {
+		path := filepath.Join(dir, "newline")
+		if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := load(path)
+		if err == nil || !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("mode 0644", func(t *testing.T) {
+		path := filepath.Join(dir, "loose")
+		const contents = "mode-secret-value"
+		if err := os.WriteFile(path, []byte(contents+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := load(path)
+		if err == nil || !strings.Contains(err.Error(), "0600") {
+			t.Fatalf("err %v", err)
+		}
+		if strings.Contains(err.Error(), contents) {
+			t.Fatal("secret appeared in the error")
+		}
+	})
+	t.Run("short", func(t *testing.T) {
+		path := filepath.Join(dir, "short")
+		const contents = "0123456789012345678901234567890"
+		if len(contents) != 31 {
+			t.Fatalf("fixture length %d", len(contents))
+		}
+		if err := os.WriteFile(path, []byte(contents+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := load(path)
+		if err == nil || !strings.Contains(err.Error(), "32") {
+			t.Fatalf("err %v", err)
+		}
+		if strings.Contains(err.Error(), contents) {
+			t.Fatal("secret appeared in the error")
+		}
+	})
+	t.Run("long enough", func(t *testing.T) {
+		path := filepath.Join(dir, "long")
+		const contents = "01234567890123456789012345678901"
+		if len(contents) != 32 {
+			t.Fatalf("fixture length %d", len(contents))
+		}
+		if err := os.WriteFile(path, []byte(contents+"\r\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		env := base(path)
+		cfg, err := configFrom(func(k string) string { return env[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ClientSecret != contents {
+			t.Fatal("secret-ok", cfg.ClientSecret == contents)
+		}
+	})
+}
+
+func TestNoPassthrough(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	mustCall(t, cs, "list_projects", map[string]any{})
+	var exchanges, v1s int
+	for _, call := range fake.snapshot() {
+		switch {
+		case call.Path == "/oauth/token":
+			exchanges++
+			assertExchange(t, call, fake.base)
+		case strings.HasPrefix(call.Path, "/v1/"):
+			v1s++
+			assertDelegatedV1(t, call)
+		default:
+			t.Fatalf("unexpected path %s", call.Path)
+		}
+	}
+	if exchanges == 0 || v1s == 0 {
+		t.Fatalf("exchanges %d v1 %d", exchanges, v1s)
+	}
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
+	}
+}
+
+func TestExchangeCacheHit(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, trips := connectMCP(t, mcpSrv, userToken)
+	mustCall(t, cs, "list_projects", map[string]any{})
+	mustCall(t, cs, "list_projects", map[string]any{})
+	if tripsN := len(trips.snapshot()); tripsN < 2 {
+		t.Fatalf("mcp requests %d", tripsN)
+	}
+	if got := fake.exchangeCount(); got != 1 {
+		t.Fatalf("exchanges %d", got)
+	}
+}
+
+func TestShortDelegatedTokenIsNotCached(t *testing.T) {
+	fake := &fakeAPI{token: userToken, expiresIn: 30}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, trips := connectMCP(t, mcpSrv, userToken)
+	mustCall(t, cs, "list_projects", map[string]any{})
+	if got, want := fake.exchangeCount(), len(trips.snapshot()); got != want {
+		t.Fatalf("exchanges %d mcp requests %d", got, want)
+	}
+	if fake.exchangeCount() < 2 {
+		t.Fatalf("expected a re-exchange, exchanges %d", fake.exchangeCount())
+	}
+}
+
+func TestExchangeInvalidGrant(t *testing.T) {
+	want := `Bearer error="invalid_token", resource_metadata="https://mcp.example/.well-known/oauth-protected-resource"`
+	for _, mode := range []string{"invalid_grant", "invalid_request"} {
+		t.Run(mode, func(t *testing.T) {
+			fake := &fakeAPI{mode: mode}
+			mcpSrv, logs := newTestServer(t, fake)
+			resp, body := postMCP(t, mcpSrv.URL, userToken)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status %d body %s", resp.StatusCode, body)
+			}
+			if got := resp.Header.Get("WWW-Authenticate"); got != want {
+				t.Fatalf("WWW-Authenticate = %q", got)
+			}
+			if strings.Contains(body, "jsonrpc") {
+				t.Fatal("MCP handled the request")
+			}
+			if fake.v1Count() != 0 {
+				t.Fatal("v1 was called")
+			}
+			if logsContainSecret(logs.String()) || strings.Contains(body, userToken) || strings.Contains(body, clientSecret) {
+				t.Fatal("secret material appeared in the response or logs")
+			}
+		})
+	}
+}
+
+func TestExchangeUnavailable(t *testing.T) {
+	t.Run("unreachable", func(t *testing.T) {
+		dead := httptest.NewServer(http.NotFoundHandler())
+		u := dead.URL
+		dead.Close()
+		api, err := apiclient.New(u, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		logs := &safeBuf{}
+		logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		handler, err := newHandler(config{
+			Listen:       "127.0.0.1:0",
+			APIURL:       u,
+			PublicOrigin: "https://mcp.example",
+			ClientSecret: clientSecret,
+		}, api, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mcpSrv := httptest.NewServer(handler)
+		t.Cleanup(mcpSrv.Close)
+		resp, body := postMCP(t, mcpSrv.URL, userToken)
+		defer resp.Body.Close()
+		assertUnavailable(t, resp, body, logs.String())
+	})
+	t.Run("as 500", func(t *testing.T) {
+		fake := &fakeAPI{mode: "as-500"}
+		mcpSrv, logs := newTestServer(t, fake)
+		resp, body := postMCP(t, mcpSrv.URL, userToken)
+		defer resp.Body.Close()
+		assertUnavailable(t, resp, body, logs.String())
+		if fake.v1Count() != 0 {
+			t.Fatal("v1 was called")
+		}
+	})
+}
+
+func TestDelegated401EvictsCache(t *testing.T) {
+	fake := &fakeAPI{token: userToken, mode: "unauthorized"}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, trips := connectMCP(t, mcpSrv, userToken)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_projects",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || textOf(t, res) != "unauthorized: session expired" {
+		t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+	}
+	if fake.exchangeCount() != 1 {
+		t.Fatalf("exchanges before retry %d", fake.exchangeCount())
+	}
+	res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_projects",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || textOf(t, res) != "unauthorized: session expired" {
+		t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+	}
+	if fake.exchangeCount() != 2 {
+		t.Fatalf("exchanges %d", fake.exchangeCount())
+	}
+	var toolOK int
+	for _, trip := range trips.snapshot() {
+		if strings.Contains(trip.body, "tools/call") && trip.status == http.StatusOK {
+			toolOK++
+		}
+	}
+	if toolOK != 2 {
+		t.Fatalf("tools/call http 200 count %d", toolOK)
+	}
+	for _, call := range fake.snapshot() {
+		if strings.HasPrefix(call.Path, "/v1/") {
+			assertDelegatedV1(t, call)
+		}
+	}
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
+	}
+}
+
+func postMCP(t *testing.T, base, token string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	return resp, string(body)
+}
+
+func assertUnavailable(t *testing.T, resp *http.Response, body, logs string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d body %s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q", got)
+	}
+	if strings.Contains(body, "jsonrpc") {
+		t.Fatal("MCP handled the request")
+	}
+	if logsContainSecret(logs) || strings.Contains(body, userToken) || strings.Contains(body, clientSecret) {
+		t.Fatal("secret material appeared in the response or logs")
+	}
+}
+
+func logsContainSecret(s string) bool {
+	return strings.Contains(s, userToken) || strings.Contains(s, delegatedToken) || strings.Contains(s, clientSecret)
+}
+
 type apiCall struct {
 	Method       string
 	Path         string
@@ -616,14 +955,16 @@ type apiCall struct {
 	Payload      json.RawMessage
 	Unexpected   []string
 	tokenInOther bool
+	callerLeaked bool
 }
 
 type fakeAPI struct {
-	mu    sync.Mutex
-	calls []apiCall
-	token string
-	mode  string
-	base  string
+	mu        sync.Mutex
+	calls     []apiCall
+	token     string
+	mode      string
+	base      string
+	expiresIn int
 }
 
 func (f *fakeAPI) count() int {
@@ -638,7 +979,37 @@ func (f *fakeAPI) last() apiCall {
 	return f.calls[len(f.calls)-1]
 }
 
+func (f *fakeAPI) snapshot() []apiCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]apiCall(nil), f.calls...)
+}
+
+func (f *fakeAPI) exchangeCount() int {
+	n := 0
+	for _, call := range f.snapshot() {
+		if call.Path == "/oauth/token" {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeAPI) v1Count() int {
+	n := 0
+	for _, call := range f.snapshot() {
+		if strings.HasPrefix(call.Path, "/v1/") {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/oauth/token" {
+		f.serveExchange(w, r)
+		return
+	}
 	body, _ := io.ReadAll(r.Body)
 	call := apiCall{
 		Method:      r.Method,
@@ -661,6 +1032,16 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if strings.HasPrefix(r.URL.Path, "/v1/") && f.token != "" {
+		if strings.Contains(call.Body, f.token) || strings.Contains(call.RawQuery, f.token) || strings.Contains(call.Path, f.token) || strings.Contains(call.ContentType, f.token) {
+			call.callerLeaked = true
+		}
+		for _, value := range call.Auth {
+			if strings.Contains(value, f.token) {
+				call.callerLeaked = true
+			}
+		}
+	}
 	status, code, msg, payload := f.reply(r)
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -672,6 +1053,40 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.calls = append(f.calls, call)
 	f.mu.Unlock()
 	writeEnvelope(w, status, code, msg, raw)
+}
+
+func (f *fakeAPI) serveExchange(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	call := apiCall{
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		RawQuery:    r.URL.RawQuery,
+		Auth:        append([]string(nil), r.Header.Values("Authorization")...),
+		Body:        string(body),
+		ContentType: r.Header.Get("Content-Type"),
+	}
+	f.mu.Lock()
+	mode := f.mode
+	expires := f.expiresIn
+	f.calls = append(f.calls, call)
+	f.mu.Unlock()
+	if expires <= 0 {
+		expires = 300
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	switch mode {
+	case "invalid_grant", "invalid_request":
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":%q,"error_description":"rejected"}`, mode)
+		return
+	case "as-500":
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server_error"}`))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"access_token":%q,"issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":%d}`, delegatedToken, expires)
 }
 
 func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
@@ -834,11 +1249,15 @@ func newTestServer(t *testing.T, fake *fakeAPI) (*httptest.Server, *safeBuf) {
 	logs := &safeBuf{}
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)
-	handler := newHandler(config{
+	handler, err := newHandler(config{
 		Listen:       "127.0.0.1:0",
 		APIURL:       apiSrv.URL,
 		PublicOrigin: "https://mcp.example/",
+		ClientSecret: clientSecret,
 	}, api, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mcpSrv := httptest.NewServer(handler)
 	t.Cleanup(mcpSrv.Close)
 	return mcpSrv, logs
@@ -940,14 +1359,63 @@ func assertLast(t *testing.T, fake *fakeAPI, method, path, rawQuery, body string
 	if call.Method != method || call.Path != path || call.RawQuery != rawQuery || call.Body != body {
 		t.Fatalf("api call method=%s path=%s query=%s body=%s", call.Method, call.Path, call.RawQuery, call.Body)
 	}
-	if len(call.Auth) != 1 || call.Auth[0] != "Bearer "+userToken {
-		t.Fatal("authorization was not the caller token")
-	}
+	assertDelegatedV1(t, call)
 	if call.tokenInOther {
 		t.Fatal("token appeared outside Authorization")
 	}
 	if len(call.Unexpected) != 0 {
 		t.Fatalf("unexpected headers %v", call.Unexpected)
+	}
+}
+
+func assertDelegatedV1(t *testing.T, call apiCall) {
+	t.Helper()
+	if !strings.HasPrefix(call.Path, "/v1/") {
+		t.Fatalf("path %s", call.Path)
+	}
+	if call.callerLeaked || call.tokenInOther {
+		t.Fatal("caller token reached /v1")
+	}
+	if len(call.Auth) != 1 || call.Auth[0] != "Bearer "+delegatedToken {
+		t.Fatalf("authorization %q", call.Auth)
+	}
+	blob := call.Body + " " + call.RawQuery + " " + call.Path + " " + call.ContentType
+	if strings.Contains(blob, userToken) || strings.Contains(blob, clientSecret) || strings.Contains(call.Auth[0], clientSecret) {
+		t.Fatal("caller token or client secret reached /v1")
+	}
+}
+
+func assertExchange(t *testing.T, call apiCall, resource string) {
+	t.Helper()
+	if call.Method != http.MethodPost || call.Path != "/oauth/token" {
+		t.Fatalf("exchange %s %s", call.Method, call.Path)
+	}
+	raw := url.QueryEscape("bot-mcp-server") + ":" + url.QueryEscape(clientSecret)
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
+	if len(call.Auth) != 1 || call.Auth[0] != wantAuth {
+		t.Fatalf("exchange auth %q", call.Auth)
+	}
+	if !strings.HasPrefix(call.ContentType, "application/x-www-form-urlencoded") {
+		t.Fatalf("content-type %s", call.ContentType)
+	}
+	form, err := url.ParseQuery(call.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:token-exchange" {
+		t.Fatalf("grant_type %q", form.Get("grant_type"))
+	}
+	if form.Get("subject_token") != userToken {
+		t.Fatalf("subject_token %q", form.Get("subject_token"))
+	}
+	if form.Get("subject_token_type") != "urn:ietf:params:oauth:token-type:access_token" {
+		t.Fatalf("subject_token_type %q", form.Get("subject_token_type"))
+	}
+	if form.Get("resource") != resource {
+		t.Fatalf("resource %q", form.Get("resource"))
+	}
+	if strings.Contains(call.Auth[0], userToken) {
+		t.Fatal("caller token in exchange authorization")
 	}
 }
 

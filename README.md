@@ -1,6 +1,6 @@
 # bot-mcp-server
 
-Stateless MCP gateway (Streamable HTTP at `/mcp`) for external AI agents. Every tool call is forwarded to bot-api-server with the caller's own user token, so permissions are exactly the console's. It also contains `deploybot login`, a device-code login CLI.
+Stateless MCP gateway (Streamable HTTP at `/mcp`) for external AI agents. Every tool call is forwarded to bot-api-server with a short-lived token exchanged from the caller's user token, so permissions are exactly the console's. It also contains `deploybot login`, a device-code login CLI.
 
 - Design: `docs/design.md` and the umbrella `docs/design-bot-agent-deploy.md` §7.
 - Contract (frozen): `docs/contracts/api-v1.md`.
@@ -13,12 +13,15 @@ The server stores nothing and writes no files. The CLI writes only `~/.config/de
 export BOT_MCP_LISTEN=127.0.0.1:8091
 export BOT_MCP_API_URL=https://<api>
 export BOT_MCP_PUBLIC_ORIGIN=https://<mcp>
+export BOT_MCP_CLIENT_SECRET_FILE=/path/to/client-secret
 go run ./cmd/bot-mcp-server
 ```
 
-`GET /health` is unauthenticated. `GET /.well-known/oauth-protected-resource` names `BOT_MCP_API_URL` as the authorization server. `POST /mcp` requires `Authorization: Bearer <token>`.
+`BOT_MCP_CLIENT_SECRET_FILE` is mode `0600`. The server reads the first line and refuses to start if the file is missing, empty, shorter than 32 characters, or not mode `0600`. That line is the secret for client id `bot-mcp-server`. It only allows exchanging a user token. It is never logged and never sent to `/v1/*`.
 
-`BOT_MCP_API_URL` and `BOT_MCP_PUBLIC_ORIGIN` must be `https`. Cleartext `http` is allowed only for `localhost`, `127.0.0.1`, and `::1`, or when `BOT_MCP_ALLOW_INSECURE_HTTP=1` (tailnet dev). The API client does not follow redirects.
+`GET /health` is unauthenticated. `GET /.well-known/oauth-protected-resource` names the API origin as the authorization server and lists scope `deploybot`. `POST /mcp` requires `Authorization: Bearer <token>`. The server exchanges that token and calls the API with the delegated token only.
+
+`BOT_MCP_API_URL` is an origin (`https://host[:port]`, optional trailing slash). A path, query, or fragment is refused at startup. `BOT_MCP_API_URL` and `BOT_MCP_PUBLIC_ORIGIN` must be `https`. Cleartext `http` is allowed only for `localhost`, `127.0.0.1`, and `::1`, or when `BOT_MCP_ALLOW_INSECURE_HTTP=1` (tailnet dev). The API client does not follow redirects.
 
 Phase 1 tools are read-only: `list_projects`, `list_hosts`, `list_services`, `query_metrics`, `list_processes`, `service_health_history`, `host_snapshot`, `probe_service`. `host_snapshot` and `probe_service` contact the host when they are called.
 
@@ -37,9 +40,17 @@ go run ./cmd/deploybot logout
 
 ## Use with Claude Code
 
+Once OAuth is live, add the server with no token header. Claude Code discovers the protected-resource metadata and signs in in the browser:
+
+```bash
+claude mcp add --transport http deploybot https://<mcp>/mcp
+```
+
+`deploybot login` stays the headless fallback for clients without a browser:
+
 ```bash
 deploybot login --api https://<api>
 claude mcp add --transport http deploybot https://<mcp>/mcp --header "Authorization: Bearer $(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path.home().joinpath(".config/deploybot/token").read_text())["token"])')"
 ```
 
-The header is the `token` field. The file also stores the API base URL, so the raw file is not a bearer token.
+The header is the `token` field. The file also stores the API base URL, so the raw file is not a bearer token. bot-mcp-server exchanges that token; it does not forward it to the API.
