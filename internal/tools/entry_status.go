@@ -23,7 +23,7 @@ const entryStatusSchema = `{
 func registerEntryStatus(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "entry_status",
-		Description: "Read the live status of a catalog program on a host. This contacts the host now and waits for the agent (up to 30 seconds). Returns the unit state, pid, start time, and ports. Fails if the host is offline or asleep.",
+		Description: "Read the live status of a catalog program or image container on a host. This contacts the host now and waits for the agent (up to 30 seconds). For a program, returns the unit state, pid, start time, and ports. For an image, returns the container state, digest, and exit code. Fails if the host is offline or asleep.",
 		Annotations: readOnlyAnnotations(true),
 		InputSchema: json.RawMessage(entryStatusSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
@@ -46,6 +46,9 @@ func registerEntryStatus(server *mcp.Server, api *apiclient.Client) {
 		if fail != nil {
 			return fail
 		}
-		return present(payload, summarizeProgramStatus(payload))
+		if imageStateRejected(payload) {
+			return toolError("error", errStatusShape.Error())
+		}
+		return present(payload, summarizeEntryStatus(payload))
 	})
 }

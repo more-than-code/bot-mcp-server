@@ -12,6 +12,10 @@ import (
 var (
 	urlUserinfo = regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^\s/]*@`)
 	secretWord  = regexp.MustCompile(`(?i)([A-Za-z0-9_.-]*(?:authorization|api[_-]?key|password|passwd|token|secret|credential)[A-Za-z0-9_.-]*)(\s*[=:]\s*|\s+)(bearer\s+)?("[^"]*"|'[^']*'|\S+)`)
+	// tokenShape catches common token literals the keyword list does not name.
+	// The bearer alternative is case-insensitive. GitHub prefixes stay exact.
+	// This is best-effort. It is not the env-value boundary.
+	tokenShape = regexp.MustCompile(`ghp_[A-Za-z0-9]+|gho_[A-Za-z0-9]+|ghu_[A-Za-z0-9]+|ghs_[A-Za-z0-9]+|ghr_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+|\bAKIA[A-Z0-9]{16}\b|glpat-[A-Za-z0-9_-]+|(?i:bearer\s+eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?)`)
 )
 
 const (
@@ -21,7 +25,8 @@ const (
 
 func redactText(s string) string {
 	s = urlUserinfo.ReplaceAllString(s, `${1}[REDACTED]@`)
-	return secretWord.ReplaceAllString(s, `${1}=[REDACTED]`)
+	s = secretWord.ReplaceAllString(s, `${1}=[REDACTED]`)
+	return tokenShape.ReplaceAllString(s, `[REDACTED]`)
 }
 
 func capBytes(s string, max int) string {
@@ -35,9 +40,11 @@ func capBytes(s string, max int) string {
 	return s[:n]
 }
 
-// redactLines rewrites every lines array: each string is redacted and capped,
+// redactLines rewrites every lines value. A string array is redacted and capped,
 // and the array stops at 64 KiB. A shortened array sets truncated on that object.
-// The original JSON is returned when nothing changes.
+// A lines value that is not an array of strings is not returned: a string is
+// redacted into a one-element array, and any other shape is dropped.
+// A body that is not JSON becomes an empty object. The raw body is never returned.
 func redactLines(raw json.RawMessage) json.RawMessage {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return raw
@@ -46,7 +53,7 @@ func redactLines(raw json.RawMessage) json.RawMessage {
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return raw
+		return []byte(`{}`)
 	}
 	changed := false
 	walkRedactLines(v, &changed)
@@ -55,7 +62,7 @@ func redactLines(raw json.RawMessage) json.RawMessage {
 	}
 	out, err := json.Marshal(v)
 	if err != nil {
-		return raw
+		return []byte(`{}`)
 	}
 	return out
 }
@@ -65,17 +72,22 @@ func walkRedactLines(v any, changed *bool) {
 	case map[string]any:
 		for key, child := range node {
 			if key == "lines" {
-				arr, ok := child.([]any)
-				if !ok {
-					continue
-				}
-				next, shortened := redactLineArray(arr)
-				if shortened || !linesEqual(arr, next) {
-					node[key] = next
+				switch line := child.(type) {
+				case []any:
+					next, shortened := redactLineArray(line)
+					if shortened || !linesEqual(line, next) {
+						node[key] = next
+						*changed = true
+					}
+					if shortened {
+						node["truncated"] = true
+						*changed = true
+					}
+				case string:
+					node[key] = []any{capBytes(redactText(line), maxLogLineBytes)}
 					*changed = true
-				}
-				if shortened {
-					node["truncated"] = true
+				default:
+					delete(node, key)
 					*changed = true
 				}
 				continue
@@ -96,7 +108,7 @@ func redactLineArray(arr []any) ([]any, bool) {
 	for _, item := range arr {
 		s, ok := item.(string)
 		if !ok {
-			out = append(out, item)
+			shortened = true
 			continue
 		}
 		redacted := redactText(s)

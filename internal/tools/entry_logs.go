@@ -24,7 +24,7 @@ const entryLogsSchema = `{
 func registerEntryLogs(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "entry_logs",
-		Description: "Read recent log lines for a catalog program on a host. Optional lines is 1 to 1000 (default 200 when omitted). This contacts the host now and waits for the agent (up to 30 seconds). Fails if the host is offline or asleep.",
+		Description: "Read recent log lines for a catalog program or image container on a host. Optional lines is 1 to 1000 (default 200 when omitted). This contacts the host now and waits for the agent (up to 30 seconds). Fails if the host is offline or asleep.",
 		Annotations: readOnlyAnnotations(true),
 		InputSchema: json.RawMessage(entryLogsSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {

@@ -2,11 +2,13 @@ package apiclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDoForwardsTokenAndDoesNotFollowRedirects(t *testing.T) {
@@ -131,3 +133,104 @@ func TestNewRequiresHTTPS(t *testing.T) {
 }
 
 func apiclientNew(raw string) (*Client, error) { return New(raw, false) }
+
+type errRT struct{ err error }
+
+func (e errRT) RoundTrip(*http.Request) (*http.Response, error) { return nil, e.err }
+
+func TestDeadlineIsDistinctFromTransportError(t *testing.T) {
+	client, err := apiclientNew("https://api.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetRoundTripper(errRT{err: context.DeadlineExceeded})
+	_, _, err = client.DoStatus(context.Background(), "tok", http.MethodGet, "/v1/me", nil, nil)
+	if !errors.Is(err, ErrDeadline) {
+		t.Fatalf("err %v", err)
+	}
+	client.SetRoundTripper(errRT{err: errors.New("dial tcp: connection refused")})
+	_, _, err = client.DoStatus(context.Background(), "tok", http.MethodGet, "/v1/me", nil, nil)
+	if err == nil || err.Error() != "api request failed" || errors.Is(err, ErrDeadline) {
+		t.Fatalf("err %v", err)
+	}
+}
+
+type deadlineRT struct {
+	base http.RoundTripper
+	got  []time.Duration
+}
+
+func (d *deadlineRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	if dl, ok := r.Context().Deadline(); ok {
+		d.got = append(d.got, time.Until(dl))
+	} else {
+		d.got = append(d.got, 0)
+	}
+	return d.base.RoundTrip(r)
+}
+
+func TestDoStatusWithinIsPerCall(t *testing.T) {
+	if Timeout != 35*time.Second {
+		t.Fatalf("default timeout %s", Timeout)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"ok","msg":"","payload":{}}`))
+	}))
+	defer srv.Close()
+	client, err := apiclientNew(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("client timeout %s", client.http.Timeout)
+	}
+	rt := &deadlineRT{base: http.DefaultTransport}
+	client.SetRoundTripper(rt)
+	near := func(got, want time.Duration) {
+		t.Helper()
+		if got < want-15*time.Second || got > want+time.Second {
+			t.Fatalf("deadline %s want %s", got, want)
+		}
+	}
+	if _, _, err := client.DoStatus(context.Background(), "tok", http.MethodGet, "/v1/me", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.DoStatusWithin(context.Background(), 990*time.Second, "tok", http.MethodGet, "/v1/me", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.DoStatus(context.Background(), "tok", http.MethodGet, "/v1/me", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.got) != 3 {
+		t.Fatalf("deadlines %v", rt.got)
+	}
+	near(rt.got[0], Timeout)
+	near(rt.got[1], 990*time.Second)
+	near(rt.got[2], Timeout)
+	if client.http.Timeout != 0 {
+		t.Fatalf("client timeout %s", client.http.Timeout)
+	}
+}
+
+func TestDoStatusWithinFires(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":"ok","msg":"","payload":{}}`))
+	}))
+	defer srv.Close()
+	client, err := apiclientNew(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, _, err = client.DoStatusWithin(context.Background(), 200*time.Millisecond, "tok", http.MethodGet, "/v1/me", nil, nil)
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrDeadline) {
+		t.Fatalf("err %v", err)
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("elapsed %s", elapsed)
+	}
+}

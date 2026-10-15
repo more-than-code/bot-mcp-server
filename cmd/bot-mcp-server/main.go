@@ -13,6 +13,15 @@ import (
 	"github.com/more-than-code/bot-mcp-server/internal/tools"
 )
 
+// writeTimeout is the server-wide bound. /health, unauthenticated requests,
+// and every tool except a long confirm stay on it. A confirm that is about
+// to perform an image deploy or rollback, or whose budget is unknown, extends
+// only that response to the budget plus writeTimeout, and never past
+// mcpWriteTimeout. There is no in-flight cap: no number was approved.
+const writeTimeout = 70 * time.Second
+
+const mcpWriteTimeout = apiclient.MaxCallTimeout + 70*time.Second
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -36,8 +45,8 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		// WriteTimeout covers handler time, including the 35s API client timeout.
-		WriteTimeout: 70 * time.Second,
+		// WriteTimeout stays short. A long confirm extends its own response.
+		WriteTimeout: writeTimeout,
 		IdleTimeout:  120 * time.Second,
 		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
@@ -71,9 +80,10 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Ha
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
-		Stateless:    true,
-		JSONResponse: true,
-		Logger:       logger,
+		Stateless:                    true,
+		JSONResponse:                 true,
+		Logger:                       logger,
+		PropagateRequestCancellation: true,
 	})
 
 	mux := http.NewServeMux()
@@ -83,6 +93,25 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Ha
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("GET /.well-known/oauth-protected-resource", auth.ProtectedResource(cfg.PublicOrigin, cfg.APIURL))
-	mux.Handle("/mcp", exchanger.RequireDelegated(cfg.PublicOrigin, mcpHandler))
+	mux.Handle("/mcp", exchanger.RequireDelegated(cfg.PublicOrigin, withWriteBudget(mcpHandler)))
 	return mux, nil
+}
+
+// withWriteBudget lets a long confirm extend this response's write deadline.
+// The deadline stays at the server WriteTimeout until that confirm asks.
+func withWriteBudget(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fn := func(budget time.Duration) error {
+			if budget <= 0 {
+				return nil
+			}
+			limit := budget + writeTimeout
+			if limit > mcpWriteTimeout {
+				limit = mcpWriteTimeout
+			}
+			return http.NewResponseController(w).SetWriteDeadline(time.Now().Add(limit))
+		}
+		ctx := tools.WithWriteBudget(r.Context(), fn)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

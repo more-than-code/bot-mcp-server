@@ -1,6 +1,6 @@
 // Package tools registers the MCP tools. Each tool calls bot-api-server with
 // the delegated token for this request. The caller's token is never sent.
-// Catalog run, stop, and restart do not act until confirm.
+// Catalog run, stop, restart, deploy, and rollback do not act until confirm.
 package tools
 
 import (
@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -42,6 +43,8 @@ func Register(server *mcp.Server, api *apiclient.Client) {
 	registerRunEntry(server, api)
 	registerStopEntry(server, api)
 	registerRestartEntry(server, api)
+	registerDeployEntry(server, api)
+	registerRollbackEntry(server, api)
 	registerConfirm(server, api)
 	registerEntryLogs(server, api)
 	registerEntryStatus(server, api)
@@ -72,8 +75,8 @@ func readOnlyAnnotations(openWorld bool) *mcp.ToolAnnotations {
 }
 
 // mutatingAnnotations marks a tool that changes a host. openWorld is false
-// for run, stop, and restart: those calls do not act. confirm sets it true
-// because that call contacts the host.
+// for run, stop, restart, deploy, and rollback: those calls do not act.
+// confirm sets it true because that call contacts the host.
 func mutatingAnnotations(openWorld bool) *mcp.ToolAnnotations {
 	open := openWorld
 	destructive := true
@@ -111,7 +114,7 @@ func badRequest(err error) *mcp.CallToolResult {
 func fromAPI(err error) *mcp.CallToolResult {
 	var apiErr *apiclient.Error
 	if errors.As(err, &apiErr) {
-		return toolError(apiErr.Code, apiErr.Msg)
+		return toolError(apiErr.Code, redactText(apiErr.Msg))
 	}
 	return toolError("error", "api request failed")
 }
@@ -154,6 +157,37 @@ func postStatus(ctx context.Context, api *apiclient.Client, path string, body an
 	return callStatus(ctx, api, http.MethodPost, path, nil, body)
 }
 
+// postWithin is postStatus with a per-call deadline. A deadline is reported
+// as still running on the host. Only confirm uses it, and only for an image
+// deploy or rollback. Other calls keep the default deadline and the generic
+// API error.
+func postWithin(ctx context.Context, api *apiclient.Client, path string, body any, timeout time.Duration) (int, json.RawMessage, *mcp.CallToolResult) {
+	return callStatusWithin(ctx, api, http.MethodPost, path, nil, body, timeout)
+}
+
+func callStatusWithin(ctx context.Context, api *apiclient.Client, method, path string, query url.Values, body any, timeout time.Duration) (int, json.RawMessage, *mcp.CallToolResult) {
+	token, ok := auth.DelegatedFromContext(ctx)
+	if !ok {
+		return 0, nil, toolError("unauthorized", "missing bearer token")
+	}
+	status, payload, err := api.DoStatusWithin(ctx, timeout, token, method, path, query, body)
+	if err != nil {
+		if errors.Is(err, apiclient.ErrDeadline) {
+			return 0, nil, stillRunning()
+		}
+		var apiErr *apiclient.Error
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+			auth.NoteRejected(ctx)
+		}
+		return 0, nil, fromAPI(err)
+	}
+	return status, payload, nil
+}
+
+func stillRunning() *mcp.CallToolResult {
+	return toolError("error", "still running on the host, check entry_status later")
+}
+
 // actedOrPending reports a program status only for HTTP 200.
 // HTTP 202 is a confirmation: nothing ran, and the result is the plan.
 // confirm uses this. run, stop, and restart use confirmationOnly.
@@ -162,7 +196,12 @@ func actedOrPending(status int, payload json.RawMessage) *mcp.CallToolResult {
 	case http.StatusAccepted:
 		return pendingConfirmation(payload)
 	case http.StatusOK:
-		return present(payload, summarizeProgramStatus(payload))
+		payload = redactLines(payload)
+		payload = projectDeployResult(payload)
+		if imageStateRejected(payload) {
+			return toolError("error", errStatusShape.Error())
+		}
+		return present(payload, summarizeActed(payload))
 	default:
 		return toolError("error", "unexpected http status")
 	}
@@ -177,11 +216,22 @@ func confirmationOnly(status int, payload json.RawMessage) *mcp.CallToolResult {
 	return pendingConfirmation(payload)
 }
 
+// errConfirmationShape is fixed. It must not include the confirmation body.
+var errConfirmationShape = errors.New("confirmation response was not usable")
+
+// errStatusShape is fixed. It must not include the status body or the state.
+var errStatusShape = errors.New("status response was not usable")
+
 // pendingConfirmation shows the plan and the confirmation id.
 // The text says nothing ran yet. The payload is not summarized as a program status.
-// Every string in the structured payload has controls replaced, and plan is capped.
+// The structured result is an allowlist: confirmation_id, plan, expires_at,
+// history, and force when it is true. plan is redacted and capped.
 func pendingConfirmation(payload json.RawMessage) *mcp.CallToolResult {
-	payload = scrubConfirmation(payload)
+	projected, err := projectConfirmation(payload)
+	if err != nil {
+		return toolError("error", errConfirmationShape.Error())
+	}
+	payload = projected
 	var body struct {
 		ConfirmationID string `json:"confirmation_id"`
 		Plan           string `json:"plan"`
@@ -202,67 +252,203 @@ func pendingConfirmation(payload json.RawMessage) *mcp.CallToolResult {
 	}
 	if body.Plan != "" {
 		b.WriteByte('\n')
-		b.WriteString(clampField(body.Plan, maxPlanRunes))
+		// projectConfirmation already redacted and capped the plan.
+		b.WriteString(body.Plan)
 	}
+	b.WriteString(historyLines(payload))
 	return present(payload, b.String())
 }
 
-// scrubConfirmation replaces controls in every string and caps plan.
-// A payload with nothing to change is returned as the original bytes.
-func scrubConfirmation(raw json.RawMessage) json.RawMessage {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return raw
+// projectConfirmation returns only confirmation_id, plan, expires_at, history,
+// and force when true. plan is redacted, then capped. force: true is part of
+// the plan string. Anything else in the body is dropped. A non-object is an error.
+func projectConfirmation(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, errConfirmationShape
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return raw
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		return nil, errConfirmationShape
 	}
-	changed := false
-	walkScrubStrings(v, &changed)
-	if !changed {
-		return raw
+	out := map[string]any{}
+	if s, ok := body["confirmation_id"].(string); ok {
+		out["confirmation_id"] = publicString(s)
 	}
-	out, err := json.Marshal(v)
+	if s, ok := body["expires_at"].(string); ok {
+		out["expires_at"] = publicString(s)
+	}
+	plan, _ := body["plan"].(string)
+	plan = redactText(plan)
+	force, _ := body["force"].(bool)
+	if force {
+		room := maxPlanRunes - len([]rune("\nforce: true"))
+		if plan == "" {
+			plan = "force: true"
+		} else {
+			plan = clampField(plan, room) + "\nforce: true"
+		}
+		out["force"] = true
+	} else {
+		plan = clampField(plan, maxPlanRunes)
+	}
+	if plan != "" {
+		out["plan"] = plan
+	}
+	if hist, ok := body["history"].([]any); ok {
+		out["history"] = projectHistoryRows(hist)
+	}
+	encoded, err := json.Marshal(out)
 	if err != nil {
+		return nil, errConfirmationShape
+	}
+	return encoded, nil
+}
+
+// projectDeployResult allowlists an image deploy or rollback result.
+// A payload without a deploy object is returned unchanged (program status,
+// image status, logs). A deploy object keeps outcome, digest, and exit_code.
+// status keeps the ImageStatus fields. A state outside the allowlist drops status.
+// lines keeps strings only.
+func projectDeployResult(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return raw
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		return []byte(`{}`)
+	}
+	deploy, ok := body["deploy"]
+	if !ok {
+		return raw
+	}
+	out := map[string]any{"deploy": projectImageDeploy(deploy)}
+	if status, ok := projectImageStatus(body["status"]); ok {
+		out["status"] = status
+	}
+	if _, ok := body["lines"]; ok {
+		out["lines"] = stringList(body["lines"])
+	}
+	if truncated, ok := body["truncated"].(bool); ok {
+		out["truncated"] = truncated
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return encoded
+}
+
+func projectImageDeploy(v any) map[string]any {
+	row, _ := v.(map[string]any)
+	out := map[string]any{}
+	if s, ok := row["outcome"].(string); ok {
+		out["outcome"] = publicString(s)
+	}
+	if s, ok := row["digest"].(string); ok {
+		out["digest"] = publicString(s)
+	}
+	if n, ok := row["exit_code"].(json.Number); ok {
+		out["exit_code"] = n
 	}
 	return out
 }
 
-func walkScrubStrings(v any, changed *bool) {
-	switch node := v.(type) {
-	case map[string]any:
-		for key, child := range node {
-			s, ok := child.(string)
-			if !ok {
-				walkScrubStrings(child, changed)
-				continue
-			}
-			next := replaceControls(s)
-			if key == "plan" {
-				next = clampField(s, maxPlanRunes)
-			}
-			if next != s {
-				node[key] = next
-				*changed = true
-			}
-		}
-	case []any:
-		for i, child := range node {
-			s, ok := child.(string)
-			if !ok {
-				walkScrubStrings(child, changed)
-				continue
-			}
-			next := replaceControls(s)
-			if next != s {
-				node[i] = next
-				*changed = true
-			}
+// imageStateRejected reports a status body whose state is outside the allowlist.
+// A deploy result is not checked here: projectImageStatus already drops that status.
+// A missing or empty state is a program status, or a status with nothing to show.
+// The caller returns errStatusShape and does not return the body.
+func imageStateRejected(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		return false
+	}
+	if _, ok := body["deploy"]; ok {
+		return false
+	}
+	state, exists := body["state"]
+	if !exists || state == nil {
+		return false
+	}
+	s, ok := state.(string)
+	if !ok || (s != "" && !imageStateOK(s)) {
+		return true
+	}
+	return false
+}
+
+func projectImageStatus(v any) (map[string]any, bool) {
+	row, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if state, exists := row["state"]; exists && state != nil {
+		s, isStr := state.(string)
+		if !isStr || (s != "" && !imageStateOK(s)) {
+			return nil, false
 		}
 	}
+	out := map[string]any{}
+	for _, key := range []string{"container", "started_at", "finished_at", "digest"} {
+		if s, ok := row[key].(string); ok {
+			out[key] = publicString(s)
+		}
+	}
+	if state, ok := row["state"].(string); ok && imageStateOK(state) {
+		out["state"] = state
+	}
+	for _, key := range []string{"exit_code", "restart_count"} {
+		if n, ok := row[key].(json.Number); ok {
+			out[key] = n
+		}
+	}
+	if ports := numberList(row["ports"]); ports != nil {
+		out["ports"] = ports
+	}
+	return out, true
+}
+
+func projectHistoryRows(items []any) []any {
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, map[string]any{
+			"digest":  publicString(stringField(row, "digest")),
+			"outcome": publicString(stringField(row, "outcome")),
+			"time":    publicString(stringField(row, "time")),
+		})
+	}
+	return out
+}
+
+func numberList(v any) []any {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]any, 0, len(arr))
+	for _, item := range arr {
+		n, ok := item.(json.Number)
+		if !ok {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // replaceControls maps Cc, Cf, Zl, and Zp to U+FFFD and does not shorten the text.

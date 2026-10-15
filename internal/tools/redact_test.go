@@ -22,6 +22,16 @@ func TestRedactTextVectors(t *testing.T) {
 		{"ssh://git@host:22/repo", "ssh://git@host:22/repo"},
 		{"http://127.0.0.1:3031/health", "http://127.0.0.1:3031/health"},
 		{"a://u:p@h/x b://c:d@e/y", "a://u:[REDACTED]@h/x b://c:[REDACTED]@e/y"},
+		{"pull ghp_abcdefghijklmnopqrstuvwxyz", "pull [REDACTED]"},
+		{"github_pat_11AAAAA", "[REDACTED]"},
+		{"key AKIAIOSFODNN7EXAMPLE next", "key [REDACTED] next"},
+		{"see Bearer eyJhbGciOi.eyJzdWI.sig", "see [REDACTED]"},
+		{"bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", "[REDACTED]"},
+		{"pull gho_abcdefghijklmnopqrstuvwxyz", "pull [REDACTED]"},
+		{"ghu_abcdefghijklmnopqrstuvwxyz", "[REDACTED]"},
+		{"ghs_abcdefghijklmnopqrstuvwxyz", "[REDACTED]"},
+		{"ghr_abcdefghijklmnopqrstuvwxyz", "[REDACTED]"},
+		{"glpat-abc123def", "[REDACTED]"},
 	}
 	for _, tc := range cases {
 		if got := redactText(tc.in); got != tc.out {
@@ -94,6 +104,33 @@ func TestRedactLinesCapsAndTotal(t *testing.T) {
 	}
 	if redacted.Truncated || len(redacted.Lines) != 1 || redacted.Lines[0] != "password=[REDACTED] next" {
 		t.Fatalf("redaction-only %#v", redacted)
+	}
+}
+
+func TestRedactLinesDropsNonStringShapes(t *testing.T) {
+	const leak = "postgres://app:s3cret@db/app"
+	got := redactLines([]byte(`{"container":"app","lines":"DATABASE_URL=` + leak + `"}`))
+	if strings.Contains(string(got), "s3cret") || strings.Contains(string(got), leak) {
+		t.Fatalf("string lines %s", got)
+	}
+	var body struct {
+		Lines []string `json:"lines"`
+	}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Lines) != 1 || body.Lines[0] != "DATABASE_URL=postgres://app:[REDACTED]@db/app" {
+		t.Fatalf("lines %#v", body.Lines)
+	}
+
+	got = redactLines([]byte(`{"lines":[{"msg":"password=hunter2"}]}`))
+	if strings.Contains(string(got), "hunter2") || strings.Contains(string(got), "msg") {
+		t.Fatalf("object line %s", got)
+	}
+
+	got = redactLines([]byte(`not-json ` + leak))
+	if string(got) != `{}` || strings.Contains(string(got), "s3cret") {
+		t.Fatalf("bad json %s", got)
 	}
 }
 

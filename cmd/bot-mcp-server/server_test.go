@@ -172,6 +172,7 @@ func TestTools(t *testing.T) {
 	}
 	pending := map[string]bool{
 		"run_entry": true, "stop_entry": true, "restart_entry": true,
+		"deploy_entry": true, "rollback_entry": true,
 	}
 	seen := map[string]bool{}
 	for _, tool := range listed.Tools {
@@ -242,18 +243,33 @@ func TestTools(t *testing.T) {
 			!strings.Contains(tool.Description, "Shows every process on the host to any member who can see the host.") {
 			t.Errorf("%s description %q", tool.Name, tool.Description)
 		}
+		if tool.Name == "deploy_entry" || tool.Name == "rollback_entry" {
+			for _, phrase := range []string{"deploy permission", "run containers"} {
+				if !strings.Contains(tool.Description, phrase) {
+					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+				}
+			}
+		}
+		if tool.Name == "list_catalog" {
+			for _, phrase := range []string{"env values", "volume short names"} {
+				if !strings.Contains(tool.Description, phrase) {
+					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+				}
+			}
+		}
 	}
 	for _, name := range []string{
 		"list_projects", "list_hosts", "list_services", "query_metrics",
 		"list_processes", "service_health_history", "host_snapshot", "probe_service",
 		"list_catalog", "run_entry", "stop_entry", "restart_entry",
+		"deploy_entry", "rollback_entry",
 		"confirm", "entry_logs", "entry_status",
 	} {
 		if !seen[name] {
 			t.Errorf("missing tool %s", name)
 		}
 	}
-	if len(seen) != 15 {
+	if len(seen) != 17 {
 		t.Fatalf("tool count %d", len(seen))
 	}
 
@@ -724,6 +740,21 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 		{name: "lines high", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "lines": 1001}},
 		{name: "lines negative", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "lines": -1}},
 		{name: "logs bad entry", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": "Bad", "host_id": hostID, "lines": 10}},
+		{name: "confirm entry only", tool: "confirm", args: map[string]any{"confirmation_id": confirmationID, "idempotency_key": "k", "entry": imageEntry}},
+		{name: "confirm project only", tool: "confirm", args: map[string]any{"confirmation_id": confirmationID, "idempotency_key": "k", "project_id": projectID}},
+		{name: "confirm bad entry", tool: "confirm", args: map[string]any{"confirmation_id": confirmationID, "idempotency_key": "k", "project_id": projectID, "entry": "Bad"}},
+		{name: "deploy missing key", tool: "deploy_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID}},
+		{name: "deploy missing project", tool: "deploy_entry", args: map[string]any{"entry": imageEntry, "host_id": hostID, "idempotency_key": "k"}},
+		{name: "deploy bad entry", tool: "deploy_entry", args: map[string]any{"project_id": projectID, "entry": "Bad", "host_id": hostID, "idempotency_key": "k"}},
+		{name: "deploy unknown", tool: "deploy_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "note": true}},
+		{name: "deploy digest field", tool: "deploy_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "digest": digestAB}},
+		{name: "deploy force type", tool: "deploy_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "force": "yes"}},
+		{name: "rollback missing digest", tool: "rollback_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k"}},
+		{name: "rollback short digest", tool: "rollback_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "digest": "sha256:abcd"}},
+		{name: "rollback upper digest", tool: "rollback_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "digest": "sha256:" + strings.Repeat("AB", 32)}},
+		{name: "rollback no prefix", tool: "rollback_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "digest": strings.Repeat("ab", 32)}},
+		{name: "rollback extra", tool: "rollback_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "digest": digestAB, "force": true}},
+		{name: "rollback long digest", tool: "rollback_entry", args: map[string]any{"project_id": projectID, "entry": imageEntry, "host_id": hostID, "idempotency_key": "k", "digest": digestAB + "ab"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1313,12 +1344,34 @@ type apiCall struct {
 }
 
 type fakeAPI struct {
-	mu        sync.Mutex
-	calls     []apiCall
-	token     string
-	mode      string
-	base      string
-	expiresIn int
+	mu           sync.Mutex
+	calls        []apiCall
+	token        string
+	mode         string
+	base         string
+	expiresIn    int
+	client       *apiclient.Client
+	images       bool
+	imageConfirm bool
+	confirms     int
+}
+
+func (f *fakeAPI) setMode(mode string) {
+	f.mu.Lock()
+	f.mode = mode
+	f.mu.Unlock()
+}
+
+func (f *fakeAPI) noteConfirm() {
+	f.mu.Lock()
+	f.confirms++
+	f.mu.Unlock()
+}
+
+func (f *fakeAPI) confirmCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.confirms
 }
 
 func (f *fakeAPI) count() int {
@@ -1446,6 +1499,8 @@ func (f *fakeAPI) serveExchange(w http.ResponseWriter, r *http.Request) {
 func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 	f.mu.Lock()
 	mode := f.mode
+	images := f.images
+	imageConfirm := f.imageConfirm
 	f.mu.Unlock()
 	switch mode {
 	case "forbidden":
@@ -1547,19 +1602,33 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			"result": "up", "http_status": 200, "latency_ms": 7, "checked_at": "2026-10-13T00:00:00Z",
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID+"/catalog":
-		return http.StatusOK, "ok", "", map[string]any{
-			"items": []any{map[string]any{
-				"id": "88888888-8888-4888-8888-888888888888", "project_id": projectID,
-				"name": entryName, "kind": "program",
-				"command_display": "pnpm run dev\u202ehidden",
-				"spec_hash":       "abc",
-				"spec": map[string]any{
-					"env":  map[string]any{"DATABASE_URL": "postgres://app:s3cret@db/app"},
-					"args": []any{"--token", "raw-token"},
-				},
-				"my_actions": []any{"run", "stop", "restart", "logs", "status"},
-			}},
+		if mode == "catalog-down" {
+			return http.StatusInternalServerError, "error", "catalog down", nil
 		}
+		if mode == "catalog-shape" {
+			return http.StatusOK, "ok", "", []any{map[string]any{
+				"name": imageEntry, "kind": "image",
+				"spec": map[string]any{"env": map[string]any{"NODE_ENV": envLeak}},
+			}}
+		}
+		return http.StatusOK, "ok", "", map[string]any{"items": catalogItems(images)}
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects/"+projectID+"/catalog/") && strings.HasSuffix(r.URL.Path, "/deploys"):
+		if mode == "history-down" {
+			return http.StatusInternalServerError, "error", "history down", nil
+		}
+		return http.StatusOK, "ok", "", deployHistory()
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "deploy"):
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", imageDeployResult()
+		}
+		entry := catalogEntryName(r.URL.Path)
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(imagePlan(entry, imageRefFor(entry)))
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "rollback"):
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", imageDeployResult()
+		}
+		entry := catalogEntryName(r.URL.Path)
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(imagePlan(entry, digestAB))
 	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "run"):
 		if mode == "acted" {
 			return http.StatusOK, "ok", "", programStatusPayload()
@@ -1575,6 +1644,25 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			return http.StatusOK, "ok", "", programStatusPayload()
 		}
 		return http.StatusAccepted, "ok", "", confirmationPayload("restart")
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/"+imageEntry+"/logs"):
+		return http.StatusOK, "ok", "", map[string]any{
+			"container": "lab-webadmin",
+			"lines":     []any{"listening", "token=" + logLeak},
+			"truncated": false,
+		}
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/"+imageEntry+"/status"):
+		if mode == "status-unknown" {
+			return http.StatusOK, "ok", "", timeoutImageStatus()
+		}
+		if mode == "status-bad" {
+			return http.StatusOK, "ok", "", map[string]any{
+				"container": "lab-webadmin", "state": badImageState, "note": badImageState,
+			}
+		}
+		return http.StatusOK, "ok", "", map[string]any{
+			"container": "lab-webadmin", "state": "running", "exit_code": 0, "restart_count": 1,
+			"started_at": "2026-10-15T00:00:00Z", "finished_at": nil, "digest": digestAB, "ports": []any{3031},
+		}
 	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "logs"):
 		if strings.HasSuffix(r.URL.Path, "/long-log/logs") {
 			lines := make([]any, 250)
@@ -1591,6 +1679,17 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "status"):
 		return http.StatusOK, "ok", "", programStatusPayload()
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/confirmations/"+confirmationID:
+		f.noteConfirm()
+		if imageConfirm {
+			switch mode {
+			case "confirm-timeout":
+				return http.StatusOK, "ok", "", timeoutDeployResult()
+			case "confirm-bad-state":
+				return http.StatusOK, "ok", "", badStateDeployResult()
+			default:
+				return http.StatusOK, "ok", "", imageDeployResult()
+			}
+		}
 		return http.StatusOK, "ok", "", programStatusPayload()
 	default:
 		return http.StatusNotFound, "not_found", "no such route " + r.URL.Path, nil
@@ -1678,6 +1777,7 @@ func newTestServer(t *testing.T, fake *fakeAPI) (*httptest.Server, *safeBuf) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fake.client = api
 	logs := &safeBuf{}
 	logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	slog.SetDefault(logger)

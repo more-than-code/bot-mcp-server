@@ -17,9 +17,19 @@ import (
 	"time"
 )
 
-// Timeout is how long one API call may take. Live tools wait up to 30s on
-// the agent; this leaves a few seconds for the hop.
+// Timeout is how long one API call may take unless the caller passes a
+// longer per-call deadline. Live tools wait up to 30s on the agent; this
+// leaves a few seconds for the hop.
 const Timeout = 35 * time.Second
+
+// MaxCallTimeout is the deadline for a deploy or rollback whose catalog
+// entry is not known. It covers the longest job the API allows (300s pull,
+// 3600s job, 90s slack), rounded up. It is not the default.
+const MaxCallTimeout = 4000 * time.Second
+
+// ErrDeadline means the per-call deadline fired. The text is fixed and
+// carries no URL, so a tool can show its own message.
+var ErrDeadline = errors.New("api request timed out")
 
 // maxResponseBytes caps a single API body so a hostile peer cannot exhaust memory.
 const maxResponseBytes = 8 << 20
@@ -62,12 +72,22 @@ func New(baseURL string, allowInsecureHTTP bool) (*Client, error) {
 	return &Client{
 		base: u,
 		http: &http.Client{
-			Timeout: Timeout,
+			// Timeout stays 0. Each call sets its own context deadline.
+			// A Client.Timeout of 35s would cap deploy and rollback.
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
 	}, nil
+}
+
+// SetRoundTripper replaces the HTTP transport. Tests use it to observe
+// per-call deadlines. Nil restores http.DefaultTransport.
+func (c *Client) SetRoundTripper(rt http.RoundTripper) {
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	c.http.Transport = rt
 }
 
 // Error is an API envelope that was not code "ok", or a response that was
@@ -103,7 +123,23 @@ func (c *Client) Do(ctx context.Context, token, method, path string, query url.V
 // DoStatus is Do and also returns the HTTP status when the envelope code is ok.
 // Status 202 is not an error: catalog run, stop, and restart answer 202 when
 // nothing has run. Callers must not report that status as success.
+// The deadline is Timeout.
 func (c *Client) DoStatus(ctx context.Context, token, method, path string, query url.Values, body any) (int, json.RawMessage, error) {
+	return c.DoStatusWithin(ctx, Timeout, token, method, path, query, body)
+}
+
+// DoStatusWithin is DoStatus with a deadline for this call only.
+// A non-positive timeout uses Timeout. Other calls are unchanged.
+func (c *Client) DoStatusWithin(ctx context.Context, timeout time.Duration, token, method, path string, query url.Values, body any) (int, json.RawMessage, error) {
+	if timeout <= 0 {
+		timeout = Timeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return c.do(ctx, token, method, path, query, body)
+}
+
+func (c *Client) do(ctx context.Context, token, method, path string, query url.Values, body any) (int, json.RawMessage, error) {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -129,6 +165,9 @@ func (c *Client) DoStatus(ctx context.Context, token, method, path string, query
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, nil, ErrDeadline
+		}
 		return 0, nil, errors.New("api request failed")
 	}
 	defer resp.Body.Close()

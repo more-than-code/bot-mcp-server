@@ -37,6 +37,9 @@ var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 // confirmationIDPattern is the 43-character base64url confirmation id.
 var confirmationIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
+// digestPattern is sha256: and 64 lowercase hex digits (api-v1 v1.8).
+var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
 func requireEntryName(value string) error {
 	if value == "" {
 		return errors.New("entry is required")
@@ -53,6 +56,16 @@ func requireIdempotencyKey(value string) error {
 	}
 	if !idempotencyKeyPattern.MatchString(value) {
 		return errors.New("idempotency_key must be 1 to 128 characters from [A-Za-z0-9._:-]")
+	}
+	return nil
+}
+
+func requireDigest(value string) error {
+	if value == "" {
+		return errors.New("digest is required")
+	}
+	if !digestPattern.MatchString(value) {
+		return errors.New("digest must be sha256: and 64 lowercase hex digits")
 	}
 	return nil
 }

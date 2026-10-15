@@ -245,8 +245,9 @@ func summarizeProbe(payload json.RawMessage) string {
 func summarizeCatalog(payload json.RawMessage) string {
 	var body struct {
 		Items []struct {
-			Name string `json:"name"`
-			Kind string `json:"kind"`
+			Name      string `json:"name"`
+			Kind      string `json:"kind"`
+			ImageKind string `json:"image_kind"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -254,7 +255,11 @@ func summarizeCatalog(payload json.RawMessage) string {
 	}
 	parts := make([]string, 0, len(body.Items))
 	for _, item := range body.Items {
-		parts = append(parts, summaryField(item.Name)+" ("+summaryField(item.Kind)+")")
+		label := summaryField(item.Kind)
+		if item.ImageKind != "" {
+			label += " " + summaryField(item.ImageKind)
+		}
+		parts = append(parts, summaryField(item.Name)+" ("+label+")")
 	}
 	return withPreview(fmt.Sprintf("%d catalog entries", len(body.Items)), parts)
 }
@@ -288,6 +293,7 @@ func summarizeProgramStatus(payload json.RawMessage) string {
 func summarizeProgramLogs(payload json.RawMessage) string {
 	var body struct {
 		Unit      string   `json:"unit"`
+		Container string   `json:"container"`
 		Lines     []string `json:"lines"`
 		Truncated bool     `json:"truncated"`
 	}
@@ -295,11 +301,178 @@ func summarizeProgramLogs(payload json.RawMessage) string {
 		return "program logs"
 	}
 	head := fmt.Sprintf("%d log lines", len(body.Lines))
-	if body.Unit != "" {
-		head += " for " + summaryField(body.Unit)
+	name := body.Unit
+	if name == "" {
+		name = body.Container
+	}
+	if name != "" {
+		head += " for " + summaryField(name)
 	}
 	if body.Truncated {
 		head += ", log truncated by the host"
 	}
 	return head
+}
+
+func summarizeEntryStatus(payload json.RawMessage) string {
+	if s, ok := summarizeImageStatus(payload); ok {
+		return s
+	}
+	return summarizeProgramStatus(payload)
+}
+
+func summarizeActed(payload json.RawMessage) string {
+	if s, ok := summarizeImageDeploy(payload); ok {
+		return s
+	}
+	return summarizeEntryStatus(payload)
+}
+
+// digestShortHex is the hex length shown in text. The structured digest stays
+// the full sha256 value so rollback_entry can take it.
+const digestShortHex = 12
+
+func shortDigest(d string) string {
+	const prefix = "sha256:"
+	if strings.HasPrefix(d, prefix) && len(d) == len(prefix)+64 && digestHex(d[len(prefix):]) {
+		return prefix + d[len(prefix):len(prefix)+digestShortHex]
+	}
+	return summaryField(d)
+}
+
+func digestHex(s string) bool {
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+const deployLogPreview = 3
+
+// imageStateOK is ImageStatus.state, plus v1.8.1 "unknown" for a deploy or
+// rollback whose task ran past its budget. An empty string is not a state.
+func imageStateOK(state string) bool {
+	switch state {
+	case "running", "exited", "created", "paused", "restarting", "dead", "missing", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func summarizeImageDeploy(payload json.RawMessage) (string, bool) {
+	var body struct {
+		Deploy struct {
+			Outcome  string `json:"outcome"`
+			Digest   string `json:"digest"`
+			ExitCode *int   `json:"exit_code"`
+		} `json:"deploy"`
+		Status struct {
+			State string `json:"state"`
+		} `json:"status"`
+		Lines []string `json:"lines"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return "", false
+	}
+	if body.Deploy.Outcome == "" && body.Deploy.Digest == "" {
+		return "", false
+	}
+	var b strings.Builder
+	if body.Deploy.Outcome != "" {
+		b.WriteString(summaryField(body.Deploy.Outcome))
+	}
+	// v1.8.1: a timed-out deploy or rollback reports state unknown.
+	// Other listed states stay off this line so a success summary is unchanged.
+	if imageStateOK(body.Status.State) && body.Status.State == "unknown" {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString("unknown")
+	}
+	if body.Deploy.Digest != "" {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(shortDigest(body.Deploy.Digest))
+	}
+	if body.Deploy.ExitCode != nil {
+		fmt.Fprintf(&b, " exit %d", *body.Deploy.ExitCode)
+	}
+	lines := body.Lines
+	if len(lines) > deployLogPreview {
+		lines = lines[len(lines)-deployLogPreview:]
+	}
+	for _, line := range lines {
+		b.WriteByte('\n')
+		b.WriteString(summaryField(redactText(line)))
+	}
+	return b.String(), true
+}
+
+func summarizeImageStatus(payload json.RawMessage) (string, bool) {
+	var body struct {
+		Container    *string `json:"container"`
+		State        string  `json:"state"`
+		ExitCode     *int    `json:"exit_code"`
+		RestartCount *int    `json:"restart_count"`
+		Digest       *string `json:"digest"`
+		Unit         string  `json:"unit"`
+		ActiveState  string  `json:"active_state"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return "", false
+	}
+	if body.Unit != "" || body.ActiveState != "" || !imageStateOK(body.State) {
+		return "", false
+	}
+	name := "image"
+	if body.Container != nil && *body.Container != "" {
+		name = summaryField(*body.Container)
+	}
+	var b strings.Builder
+	b.WriteString(name)
+	b.WriteByte(' ')
+	b.WriteString(summaryField(body.State))
+	if body.Digest != nil && *body.Digest != "" {
+		b.WriteByte(' ')
+		b.WriteString(shortDigest(*body.Digest))
+	}
+	if body.ExitCode != nil {
+		fmt.Fprintf(&b, " exit %d", *body.ExitCode)
+	}
+	if body.RestartCount != nil {
+		fmt.Fprintf(&b, " restarts %d", *body.RestartCount)
+	}
+	return b.String(), true
+}
+
+func historyLines(payload json.RawMessage) string {
+	var body struct {
+		History []struct {
+			Digest  string `json:"digest"`
+			Outcome string `json:"outcome"`
+			Time    string `json:"time"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil || len(body.History) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nrecent deploys:")
+	for _, item := range body.History {
+		b.WriteByte('\n')
+		b.WriteString(shortDigest(item.Digest))
+		if item.Outcome != "" {
+			b.WriteByte(' ')
+			b.WriteString(summaryField(item.Outcome))
+		}
+		if item.Time != "" {
+			b.WriteByte(' ')
+			b.WriteString(summaryField(item.Time))
+		}
+	}
+	return b.String()
 }
