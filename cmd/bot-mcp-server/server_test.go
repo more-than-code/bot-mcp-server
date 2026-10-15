@@ -33,6 +33,9 @@ const (
 	userToken      = "session-token.abc~def"
 	delegatedToken = "delegated-token.xyz~123"
 	clientSecret   = "mcp-client-secret"
+	entryName      = "tra-backend"
+	// confirmationID is 43 base64url characters, the v1.6 confirmation id length.
+	confirmationID = "Abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE"
 )
 
 func TestMissingAndInvalidToken(t *testing.T) {
@@ -158,25 +161,61 @@ func TestTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	openWorld := map[string]bool{"host_snapshot": true, "probe_service": true}
+	closed := map[string]bool{
+		"list_projects": true, "list_hosts": true, "list_services": true,
+		"query_metrics": true, "list_processes": true, "service_health_history": true,
+		"list_catalog": true,
+	}
+	live := map[string]bool{
+		"host_snapshot": true, "probe_service": true,
+		"entry_logs": true, "entry_status": true, "confirm": true,
+	}
+	pending := map[string]bool{
+		"run_entry": true, "stop_entry": true, "restart_entry": true,
+	}
 	seen := map[string]bool{}
 	for _, tool := range listed.Tools {
 		seen[tool.Name] = true
-		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
-			t.Errorf("%s readOnlyHint missing", tool.Name)
-		}
-		open := tool.Annotations != nil && tool.Annotations.OpenWorldHint != nil && *tool.Annotations.OpenWorldHint
-		if open != openWorld[tool.Name] {
-			t.Errorf("%s openWorldHint = %v", tool.Name, open)
-		}
 		if tool.Description == "" {
 			t.Errorf("%s has no description", tool.Name)
 		}
-		if openWorld[tool.Name] && !strings.Contains(tool.Description, "contacts the host now") {
-			t.Errorf("%s description %q", tool.Name, tool.Description)
-		}
-		if !openWorld[tool.Name] && !strings.Contains(tool.Description, "Does not contact") {
-			t.Errorf("%s description %q", tool.Name, tool.Description)
+		readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
+		open := tool.Annotations != nil && tool.Annotations.OpenWorldHint != nil && *tool.Annotations.OpenWorldHint
+		switch {
+		case pending[tool.Name]:
+			if readOnly || open {
+				t.Errorf("%s readOnly=%v openWorld=%v", tool.Name, readOnly, open)
+			}
+			for _, phrase := range []string{"real", "audited", "second confirm", "user agrees", "Nothing runs"} {
+				if !strings.Contains(tool.Description, phrase) {
+					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+				}
+			}
+		case live[tool.Name]:
+			if tool.Name == "confirm" {
+				if readOnly {
+					t.Errorf("confirm is read-only")
+				}
+				for _, phrase := range []string{"real", "audited", "program status"} {
+					if !strings.Contains(tool.Description, phrase) {
+						t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+					}
+				}
+			} else if !readOnly {
+				t.Errorf("%s readOnlyHint missing", tool.Name)
+			}
+			if !open || !strings.Contains(tool.Description, "contacts the host now") {
+				t.Errorf("%s description %q openWorld=%v", tool.Name, tool.Description, open)
+			}
+		case closed[tool.Name]:
+			if !readOnly {
+				t.Errorf("%s readOnlyHint missing", tool.Name)
+			}
+			if open || !strings.Contains(tool.Description, "Does not contact") {
+				t.Errorf("%s description %q openWorld=%v", tool.Name, tool.Description, open)
+			}
+		default:
+			t.Errorf("unclassified tool %s", tool.Name)
 		}
 		if tool.Name == "list_services" {
 			for _, phrase := range []string{
@@ -202,12 +241,14 @@ func TestTools(t *testing.T) {
 	for _, name := range []string{
 		"list_projects", "list_hosts", "list_services", "query_metrics",
 		"list_processes", "service_health_history", "host_snapshot", "probe_service",
+		"list_catalog", "run_entry", "stop_entry", "restart_entry",
+		"confirm", "entry_logs", "entry_status",
 	} {
 		if !seen[name] {
 			t.Errorf("missing tool %s", name)
 		}
 	}
-	if len(seen) != 8 {
+	if len(seen) != 15 {
 		t.Fatalf("tool count %d", len(seen))
 	}
 
@@ -551,6 +592,25 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 		{name: "services limit high", tool: "list_services", args: map[string]any{"project_id": projectID, "limit": 201}},
 		{name: "services q long", tool: "list_services", args: map[string]any{"project_id": projectID, "q": strings.Repeat("a", 101)}},
 		{name: "services q long runes", tool: "list_services", args: map[string]any{"project_id": projectID, "q": strings.Repeat("é", 101)}},
+		{name: "catalog bad project", tool: "list_catalog", args: map[string]any{"project_id": "not-a-uuid"}},
+		{name: "catalog unknown", tool: "list_catalog", args: map[string]any{"project_id": projectID, "extra": true}},
+		{name: "entry empty", tool: "run_entry", args: map[string]any{"project_id": projectID, "entry": "", "host_id": hostID, "idempotency_key": "k"}},
+		{name: "entry upper", tool: "run_entry", args: map[string]any{"project_id": projectID, "entry": "Tra", "host_id": hostID, "idempotency_key": "k"}},
+		{name: "entry hyphen", tool: "stop_entry", args: map[string]any{"project_id": projectID, "entry": "-a", "host_id": hostID, "idempotency_key": "k"}},
+		{name: "entry long", tool: "restart_entry", args: map[string]any{"project_id": projectID, "entry": strings.Repeat("a", 49), "host_id": hostID, "idempotency_key": "k"}},
+		{name: "entry underscore", tool: "entry_status", args: map[string]any{"project_id": projectID, "entry": "has_under", "host_id": hostID}},
+		{name: "action bad host", tool: "run_entry", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": "nope", "idempotency_key": "k"}},
+		{name: "key empty", tool: "run_entry", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "idempotency_key": ""}},
+		{name: "key space", tool: "run_entry", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "idempotency_key": "a b"}},
+		{name: "key slash", tool: "confirm", args: map[string]any{"confirmation_id": confirmationID, "idempotency_key": "a/b"}},
+		{name: "key long", tool: "stop_entry", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "idempotency_key": strings.Repeat("a", 129)}},
+		{name: "confirm id short", tool: "confirm", args: map[string]any{"confirmation_id": "abc", "idempotency_key": "k"}},
+		{name: "confirm id plus", tool: "confirm", args: map[string]any{"confirmation_id": strings.Repeat("a", 42) + "+", "idempotency_key": "k"}},
+		{name: "confirm id pad", tool: "confirm", args: map[string]any{"confirmation_id": strings.Repeat("a", 42) + "=", "idempotency_key": "k"}},
+		{name: "lines zero", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "lines": 0}},
+		{name: "lines high", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "lines": 1001}},
+		{name: "lines negative", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": entryName, "host_id": hostID, "lines": -1}},
+		{name: "logs bad entry", tool: "entry_logs", args: map[string]any{"project_id": projectID, "entry": "Bad", "host_id": hostID, "lines": 10}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -564,6 +624,187 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCatalogTools(t *testing.T) {
+	if len(confirmationID) != 43 {
+		t.Fatalf("confirmation id length %d", len(confirmationID))
+	}
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+
+	res := mustCall(t, cs, "list_catalog", map[string]any{"project_id": projectID})
+	assertLast(t, fake, http.MethodGet, "/v1/projects/"+projectID+"/catalog", "", "")
+	if textOf(t, res) != "1 catalog entries: tra-backend (program)" {
+		t.Fatalf("list_catalog text %q", textOf(t, res))
+	}
+	items, ok := structuredMap(t, res)["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items %#v", structuredMap(t, res)["items"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("item %#v", items[0])
+	}
+	if item["name"] != entryName || item["kind"] != "program" {
+		t.Fatalf("item %#v", item)
+	}
+	display, _ := item["command_display"].(string)
+	if display != "pnpm run dev\uFFFDhidden" || strings.ContainsRune(display, '\u202e') {
+		t.Fatalf("command_display %q", display)
+	}
+	allowed, ok := item["my_actions"].([]any)
+	if !ok || len(allowed) != 5 || allowed[0] != "run" {
+		t.Fatalf("my_actions %#v", item["my_actions"])
+	}
+	for _, key := range []string{"spec", "id", "project_id", "spec_hash", "env", "args"} {
+		if _, exists := item[key]; exists {
+			t.Fatalf("catalog item kept %s", key)
+		}
+	}
+	projected, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"s3cret", "raw-token", "DATABASE_URL"} {
+		if strings.Contains(string(projected), secret) {
+			t.Fatalf("catalog structured content contains %s: %s", secret, projected)
+		}
+	}
+
+	actions := []struct {
+		tool string
+		verb string
+		key  string
+	}{
+		{tool: "run_entry", verb: "run", key: "run-1"},
+		{tool: "stop_entry", verb: "stop", key: "stop.key:1"},
+		{tool: "restart_entry", verb: "restart", key: "restart_1"},
+	}
+	for _, action := range actions {
+		t.Run(action.tool, func(t *testing.T) {
+			res := mustCall(t, cs, action.tool, map[string]any{
+				"project_id": projectID, "entry": entryName, "host_id": hostID, "idempotency_key": action.key,
+			})
+			body := `{"host_id":"` + hostID + `","idempotency_key":"` + action.key + `"}`
+			path := "/v1/projects/" + projectID + "/catalog/" + entryName + "/" + action.verb
+			assertTool(t, fake, res, http.MethodPost, path, "", body)
+			plan := "will " + action.verb + " program tra-backend (pnpm run dev, as joe) on pi1"
+			want := "nothing ran yet. confirmation id " + confirmationID + ". Expires 2026-10-15T00:05:00Z.\n" + plan
+			if textOf(t, res) != want {
+				t.Fatalf("text %q", textOf(t, res))
+			}
+			if strings.Contains(textOf(t, res), "pid ") || strings.Contains(textOf(t, res), "active") {
+				t.Fatal("202 treated as program status")
+			}
+			got := structuredMap(t, res)
+			if got["confirmation_id"] != confirmationID || got["plan"] != plan {
+				t.Fatalf("payload %#v", got)
+			}
+			if _, ok := got["active_state"]; ok {
+				t.Fatal("202 payload is a program status")
+			}
+		})
+	}
+
+	res = mustCall(t, cs, "confirm", map[string]any{
+		"confirmation_id": confirmationID, "idempotency_key": "confirm-1",
+	})
+	// api-v1 v1.6.1 item 1: the confirm body is exactly this object.
+	assertTool(t, fake, res, http.MethodPost, "/v1/confirmations/"+confirmationID, "", `{"idempotency_key":"confirm-1"}`)
+	if textOf(t, res) != "deploybot-lab-tra-backend.service active (running) pid 4242" {
+		t.Fatalf("confirm text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "entry_logs", map[string]any{
+		"project_id": projectID, "entry": entryName, "host_id": hostID,
+	})
+	assertTool(t, fake, res, http.MethodPost, "/v1/projects/"+projectID+"/catalog/"+entryName+"/logs", "", `{"host_id":"`+hostID+`"}`)
+	if textOf(t, res) != "2 log lines for deploybot-lab-tra-backend.service" {
+		t.Fatalf("logs text %q", textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "entry_logs", map[string]any{
+		"project_id": projectID, "entry": entryName, "host_id": hostID, "lines": 50,
+	})
+	assertTool(t, fake, res, http.MethodPost, "/v1/projects/"+projectID+"/catalog/"+entryName+"/logs", "", `{"host_id":"`+hostID+`","lines":50}`)
+
+	res = mustCall(t, cs, "entry_status", map[string]any{
+		"project_id": projectID, "entry": entryName, "host_id": hostID,
+	})
+	assertTool(t, fake, res, http.MethodPost, "/v1/projects/"+projectID+"/catalog/"+entryName+"/status", "", `{"host_id":"`+hostID+`"}`)
+	if textOf(t, res) != "deploybot-lab-tra-backend.service active (running) pid 4242" {
+		t.Fatalf("status text %q", textOf(t, res))
+	}
+
+	entry48 := strings.Repeat("b", 48)
+	key128 := strings.Repeat("a", 128)
+	res = mustCall(t, cs, "run_entry", map[string]any{
+		"project_id": projectID, "entry": entry48, "host_id": hostID, "idempotency_key": key128,
+	})
+	assertLast(t, fake, http.MethodPost, "/v1/projects/"+projectID+"/catalog/"+entry48+"/run", "", `{"host_id":"`+hostID+`","idempotency_key":"`+key128+`"}`)
+	if res.IsError || !strings.Contains(textOf(t, res), "nothing ran yet") {
+		t.Fatalf("boundary result error=%v text %q", res.IsError, textOf(t, res))
+	}
+
+	res = mustCall(t, cs, "entry_logs", map[string]any{
+		"project_id": projectID, "entry": "long-log", "host_id": hostID, "lines": 1000,
+	})
+	assertLast(t, fake, http.MethodPost, "/v1/projects/"+projectID+"/catalog/long-log/logs", "", `{"host_id":"`+hostID+`","lines":1000}`)
+	if res.IsError {
+		t.Fatalf("long logs %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	if !strings.Contains(text, "250 log lines") || !strings.Contains(text, "truncated to 200 items.") {
+		t.Fatalf("long logs text %q", text)
+	}
+	lines, ok := structuredMap(t, res)["lines"].([]any)
+	if !ok || len(lines) != 200 || lines[0] != "line-000" {
+		t.Fatalf("lines %#v", structuredMap(t, res)["lines"])
+	}
+
+	for _, call := range fake.snapshot() {
+		if strings.HasPrefix(call.Path, "/v1/") {
+			assertDelegatedV1(t, call)
+		}
+	}
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
+	}
+}
+
+func TestCatalogAPIError(t *testing.T) {
+	fake := &fakeAPI{token: userToken, mode: "forbidden"}
+	mcpSrv, logs := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	res := mustCall(t, cs, "run_entry", map[string]any{
+		"project_id": projectID, "entry": entryName, "host_id": hostID, "idempotency_key": "run-1",
+	})
+	if !res.IsError || textOf(t, res) != "forbidden: not a member" {
+		t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+	}
+	assertLast(t, fake, http.MethodPost, "/v1/projects/"+projectID+"/catalog/"+entryName+"/run", "", `{"host_id":"`+hostID+`","idempotency_key":"run-1"}`)
+	if logsContainSecret(logs.String()) {
+		t.Fatal("secret material appeared in logs")
+	}
+}
+
+func TestEntryActionRejectsHTTP200(t *testing.T) {
+	fake := &fakeAPI{token: userToken, mode: "acted"}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	res := mustCall(t, cs, "run_entry", map[string]any{
+		"project_id": projectID, "entry": entryName, "host_id": hostID, "idempotency_key": "run-1",
+	})
+	if !res.IsError || textOf(t, res) != "error: expected a confirmation" {
+		t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+	}
+	text := textOf(t, res)
+	if strings.Contains(text, "pid ") || strings.Contains(text, "active (running)") || strings.Contains(text, "nothing ran yet") {
+		t.Fatalf("200 summarized %q", text)
+	}
+	assertLast(t, fake, http.MethodPost, "/v1/projects/"+projectID+"/catalog/"+entryName+"/run", "", `{"host_id":"`+hostID+`","idempotency_key":"run-1"}`)
 }
 
 func TestConfigFrom(t *testing.T) {
@@ -1189,8 +1430,83 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			"service": "api", "protocol": "http", "port": 8080, "path": "/health",
 			"result": "up", "http_status": 200, "latency_ms": 7, "checked_at": "2026-10-13T00:00:00Z",
 		}
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/"+projectID+"/catalog":
+		return http.StatusOK, "ok", "", map[string]any{
+			"items": []any{map[string]any{
+				"id": "88888888-8888-4888-8888-888888888888", "project_id": projectID,
+				"name": entryName, "kind": "program",
+				"command_display": "pnpm run dev\u202ehidden",
+				"spec_hash":       "abc",
+				"spec": map[string]any{
+					"env":  map[string]any{"DATABASE_URL": "postgres://app:s3cret@db/app"},
+					"args": []any{"--token", "raw-token"},
+				},
+				"my_actions": []any{"run", "stop", "restart", "logs", "status"},
+			}},
+		}
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "run"):
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", programStatusPayload()
+		}
+		return http.StatusAccepted, "ok", "", confirmationPayload("run")
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "stop"):
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", programStatusPayload()
+		}
+		return http.StatusAccepted, "ok", "", confirmationPayload("stop")
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "restart"):
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", programStatusPayload()
+		}
+		return http.StatusAccepted, "ok", "", confirmationPayload("restart")
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "logs"):
+		if strings.HasSuffix(r.URL.Path, "/long-log/logs") {
+			lines := make([]any, 250)
+			for i := range lines {
+				lines[i] = fmt.Sprintf("line-%03d", i)
+			}
+			return http.StatusOK, "ok", "", map[string]any{
+				"unit": "deploybot-lab-long-log.service", "lines": lines, "truncated": false,
+			}
+		}
+		return http.StatusOK, "ok", "", map[string]any{
+			"unit": "deploybot-lab-tra-backend.service", "lines": []any{"listening", "ready"}, "truncated": false,
+		}
+	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "status"):
+		return http.StatusOK, "ok", "", programStatusPayload()
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/confirmations/"+confirmationID:
+		return http.StatusOK, "ok", "", programStatusPayload()
 	default:
 		return http.StatusNotFound, "not_found", "no such route " + r.URL.Path, nil
+	}
+}
+
+func catalogVerb(path, verb string) bool {
+	prefix := "/v1/projects/" + projectID + "/catalog/"
+	suffix := "/" + verb
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return name != "" && !strings.Contains(name, "/")
+}
+
+func confirmationPayload(verb string) map[string]any {
+	return map[string]any{
+		"confirmation_id": confirmationID,
+		"plan":            "will " + verb + " program tra-backend (pnpm run dev, as joe) on pi1",
+		"expires_at":      "2026-10-15T00:05:00Z",
+	}
+}
+
+func programStatusPayload() map[string]any {
+	return map[string]any{
+		"unit":         "deploybot-lab-tra-backend.service",
+		"active_state": "active",
+		"sub_state":    "running",
+		"main_pid":     4242,
+		"started_at":   "2026-10-15T00:00:00Z",
+		"ports":        []any{3031},
 	}
 }
 

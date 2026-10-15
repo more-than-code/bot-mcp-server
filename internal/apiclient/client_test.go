@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,34 @@ func TestDoOmitsAuthorizationWhenTokenEmpty(t *testing.T) {
 	}
 	if got.UserCode != "ABCD-EFGH" || got.Interval != 5 {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestDoStatusKeepsAccepted(t *testing.T) {
+	const token = "delegated"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("Authorization %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"code":"ok","msg":"","payload":{"confirmation_id":"abc","plan":"will run","expires_at":"2026-10-15T00:05:00Z"}}`))
+	}))
+	defer srv.Close()
+
+	client, err := apiclientNew(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, payload, err := client.DoStatus(context.Background(), token, http.MethodPost, "/v1/projects/p/catalog/e/run", nil, map[string]string{"host_id": "h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusAccepted {
+		t.Fatalf("status %d", status)
+	}
+	if !strings.Contains(string(payload), `"plan":"will run"`) {
+		t.Fatalf("payload %s", payload)
 	}
 }
 

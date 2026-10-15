@@ -93,12 +93,22 @@ type envelope struct {
 
 // Do performs one v1 call. token is sent as Authorization: Bearer only when
 // it is non-empty. The returned bytes are the raw payload JSON.
+// A 202 whose envelope code is ok is not an error. Callers that must not
+// treat that as the action having run use DoStatus.
 func (c *Client) Do(ctx context.Context, token, method, path string, query url.Values, body any) (json.RawMessage, error) {
+	_, payload, err := c.DoStatus(ctx, token, method, path, query, body)
+	return payload, err
+}
+
+// DoStatus is Do and also returns the HTTP status when the envelope code is ok.
+// Status 202 is not an error: catalog run, stop, and restart answer 202 when
+// nothing has run. Callers must not report that status as success.
+func (c *Client) DoStatus(ctx context.Context, token, method, path string, query url.Values, body any) (int, json.RawMessage, error) {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return nil, errors.New("could not encode api request")
+			return 0, nil, errors.New("could not encode api request")
 		}
 		rdr = bytes.NewReader(buf)
 	}
@@ -108,7 +118,7 @@ func (c *Client) Do(ctx context.Context, token, method, path string, query url.V
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), rdr)
 	if err != nil {
-		return nil, errors.New("could not build api request")
+		return 0, nil, errors.New("could not build api request")
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -119,14 +129,18 @@ func (c *Client) Do(ctx context.Context, token, method, path string, query url.V
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, errors.New("api request failed")
+		return 0, nil, errors.New("api request failed")
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, errors.New("api request failed")
+		return 0, nil, errors.New("api request failed")
 	}
-	return decodeEnvelope(resp.StatusCode, data)
+	payload, err := decodeEnvelope(resp.StatusCode, data)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, payload, nil
 }
 
 func decodeEnvelope(status int, data []byte) (json.RawMessage, error) {

@@ -13,10 +13,19 @@ const previewCount = 8
 // summaryFieldRunes is the longest single field placed in a summary line.
 const summaryFieldRunes = 80
 
+// maxPlanRunes is the longest confirmation plan placed in a tool result.
+// The plan is the sentence the user must agree to, so it is longer than one field.
+const maxPlanRunes = 1024
+
 // summaryField replaces controls, format characters, and line or paragraph
 // separators with U+FFFD, then caps the result at summaryFieldRunes.
 // That keeps bidi overrides and Unicode line breaks out of a summary line.
 func summaryField(s string) string {
+	return clampField(s, summaryFieldRunes)
+}
+
+// clampField is summaryField with an explicit rune cap.
+func clampField(s string, max int) string {
 	runes := make([]rune, 0, len(s))
 	for _, r := range s {
 		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
@@ -24,10 +33,13 @@ func summaryField(s string) string {
 		}
 		runes = append(runes, r)
 	}
-	if len(runes) <= summaryFieldRunes {
+	if max < 1 {
+		return ""
+	}
+	if len(runes) <= max {
 		return string(runes)
 	}
-	return string(runes[:summaryFieldRunes-1]) + "…"
+	return string(runes[:max-1]) + "…"
 }
 
 func withPreview(head string, parts []string) string {
@@ -222,4 +234,66 @@ func summarizeProbe(payload json.RawMessage) string {
 		return "probe result"
 	}
 	return fmt.Sprintf("probe %s %s:%d (%s) %dms", summaryField(body.Result), summaryField(body.Protocol), body.Port, summaryField(body.Service), body.LatencyMS)
+}
+
+func summarizeCatalog(payload json.RawMessage) string {
+	var body struct {
+		Items []struct {
+			Name string `json:"name"`
+			Kind string `json:"kind"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return "catalog"
+	}
+	parts := make([]string, 0, len(body.Items))
+	for _, item := range body.Items {
+		parts = append(parts, summaryField(item.Name)+" ("+summaryField(item.Kind)+")")
+	}
+	return withPreview(fmt.Sprintf("%d catalog entries", len(body.Items)), parts)
+}
+
+func summarizeProgramStatus(payload json.RawMessage) string {
+	var body struct {
+		Unit        string `json:"unit"`
+		ActiveState string `json:"active_state"`
+		SubState    string `json:"sub_state"`
+		MainPID     *int   `json:"main_pid"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil || (body.Unit == "" && body.ActiveState == "") {
+		return "program status"
+	}
+	head := summaryField(body.Unit)
+	if head == "" {
+		head = "program"
+	}
+	if body.ActiveState != "" {
+		head += " " + summaryField(body.ActiveState)
+	}
+	if body.SubState != "" {
+		head += " (" + summaryField(body.SubState) + ")"
+	}
+	if body.MainPID != nil {
+		head += fmt.Sprintf(" pid %d", *body.MainPID)
+	}
+	return head
+}
+
+func summarizeProgramLogs(payload json.RawMessage) string {
+	var body struct {
+		Unit      string   `json:"unit"`
+		Lines     []string `json:"lines"`
+		Truncated bool     `json:"truncated"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return "program logs"
+	}
+	head := fmt.Sprintf("%d log lines", len(body.Lines))
+	if body.Unit != "" {
+		head += " for " + summaryField(body.Unit)
+	}
+	if body.Truncated {
+		head += ", log truncated by the host"
+	}
+	return head
 }

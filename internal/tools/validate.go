@@ -28,6 +28,72 @@ func requireUUID(name, value string) error {
 	return nil
 }
 
+// entryNamePattern is the catalog name rule from api-v1 v1.6.
+var entryNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,47}$`)
+
+// idempotencyKeyPattern is the v1.6 key: 1–128 chars from that set.
+var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+// confirmationIDPattern is the 43-character base64url confirmation id.
+var confirmationIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+func requireEntryName(value string) error {
+	if value == "" {
+		return errors.New("entry is required")
+	}
+	if !entryNamePattern.MatchString(value) {
+		return errors.New("entry must be a lowercase catalog name of at most 48 characters")
+	}
+	return nil
+}
+
+func requireIdempotencyKey(value string) error {
+	if value == "" {
+		return errors.New("idempotency_key is required")
+	}
+	if !idempotencyKeyPattern.MatchString(value) {
+		return errors.New("idempotency_key must be 1 to 128 characters from [A-Za-z0-9._:-]")
+	}
+	return nil
+}
+
+func requireConfirmationID(value string) error {
+	if value == "" {
+		return errors.New("confirmation_id is required")
+	}
+	if !confirmationIDPattern.MatchString(value) {
+		return errors.New("confirmation_id must be 43 base64url characters")
+	}
+	return nil
+}
+
+func optionalLines(value *int) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 1 || *value > 1000 {
+		return errors.New("lines must be between 1 and 1000")
+	}
+	return nil
+}
+
+func validateEntryLocation(projectID, entry, hostID string) error {
+	if err := requireUUID("project_id", projectID); err != nil {
+		return err
+	}
+	if err := requireEntryName(entry); err != nil {
+		return err
+	}
+	return requireUUID("host_id", hostID)
+}
+
+func validateEntryAction(projectID, entry, hostID, key string) error {
+	if err := validateEntryLocation(projectID, entry, hostID); err != nil {
+		return err
+	}
+	return requireIdempotencyKey(key)
+}
+
 func optionalTime(name string, value *string) (string, error) {
 	if value == nil {
 		return "", nil

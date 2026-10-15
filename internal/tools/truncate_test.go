@@ -53,3 +53,27 @@ func TestTruncateListsCutsItemsAndPoints(t *testing.T) {
 		t.Fatalf("point re-encoded: %s", out.Series[0].Points[0][1])
 	}
 }
+
+func TestTruncateListsCutsLines(t *testing.T) {
+	lines := make([]any, 250)
+	for i := range lines {
+		lines[i] = "line"
+	}
+	body, err := json.Marshal(map[string]any{"unit": "u", "lines": lines, "truncated": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, note := truncateLists(body, 200)
+	if note != "truncated to 200 items." {
+		t.Fatalf("note %q", note)
+	}
+	var out struct {
+		Lines []string `json:"lines"`
+	}
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Lines) != 200 {
+		t.Fatalf("lines %d", len(out.Lines))
+	}
+}

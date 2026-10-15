@@ -1,5 +1,6 @@
-// Package tools registers the phase 1 MCP tools. Each tool reads through
-// bot-api-server with the delegated token for this request and does not write.
+// Package tools registers the MCP tools. Each tool calls bot-api-server with
+// the delegated token for this request. The caller's token is never sent.
+// Catalog run, stop, and restart do not act until confirm.
 package tools
 
 import (
@@ -27,7 +28,7 @@ const maxListItems = 200
 // maxErrorBytes caps code and msg copied into a tool error.
 const maxErrorBytes = 1024
 
-// Register adds the eight phase 1 tools to server.
+// Register adds the phase 1 tools and the catalog tools to server.
 func Register(server *mcp.Server, api *apiclient.Client) {
 	registerListProjects(server, api)
 	registerListHosts(server, api)
@@ -37,6 +38,13 @@ func Register(server *mcp.Server, api *apiclient.Client) {
 	registerServiceHealthHistory(server, api)
 	registerHostSnapshot(server, api)
 	registerProbeService(server, api)
+	registerListCatalog(server, api)
+	registerRunEntry(server, api)
+	registerStopEntry(server, api)
+	registerRestartEntry(server, api)
+	registerConfirm(server, api)
+	registerEntryLogs(server, api)
+	registerEntryStatus(server, api)
 }
 
 func addTool(server *mcp.Server, tool *mcp.Tool, h func(context.Context, json.RawMessage) *mcp.CallToolResult) {
@@ -61,6 +69,20 @@ func addTool(server *mcp.Server, tool *mcp.Tool, h func(context.Context, json.Ra
 func readOnlyAnnotations(openWorld bool) *mcp.ToolAnnotations {
 	open := openWorld
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}
+}
+
+// mutatingAnnotations marks a tool that changes a host. openWorld is false
+// for run, stop, and restart: those calls do not act. confirm sets it true
+// because that call contacts the host.
+func mutatingAnnotations(openWorld bool) *mcp.ToolAnnotations {
+	open := openWorld
+	destructive := true
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:    false,
+		DestructiveHint: &destructive,
+		IdempotentHint:  true,
+		OpenWorldHint:   &open,
+	}
 }
 
 func toolError(code, msg string) *mcp.CallToolResult {
@@ -98,19 +120,26 @@ func fromAPI(err error) *mcp.CallToolResult {
 // It never sends the caller's token. A 401 drops that delegated token from
 // the exchange cache so the next request exchanges again.
 func call(ctx context.Context, api *apiclient.Client, method, path string, query url.Values, body any) (json.RawMessage, *mcp.CallToolResult) {
+	_, payload, fail := callStatus(ctx, api, method, path, query, body)
+	return payload, fail
+}
+
+// callStatus is call plus the HTTP status of an ok envelope. Status 202 is
+// not a tool error here; the caller decides what it means.
+func callStatus(ctx context.Context, api *apiclient.Client, method, path string, query url.Values, body any) (int, json.RawMessage, *mcp.CallToolResult) {
 	token, ok := auth.DelegatedFromContext(ctx)
 	if !ok {
-		return nil, toolError("unauthorized", "missing bearer token")
+		return 0, nil, toolError("unauthorized", "missing bearer token")
 	}
-	payload, err := api.Do(ctx, token, method, path, query, body)
+	status, payload, err := api.DoStatus(ctx, token, method, path, query, body)
 	if err != nil {
 		var apiErr *apiclient.Error
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 			auth.NoteRejected(ctx)
 		}
-		return nil, fromAPI(err)
+		return 0, nil, fromAPI(err)
 	}
-	return payload, nil
+	return status, payload, nil
 }
 
 func get(ctx context.Context, api *apiclient.Client, path string, query url.Values) (json.RawMessage, *mcp.CallToolResult) {
@@ -121,8 +150,132 @@ func post(ctx context.Context, api *apiclient.Client, path string, body any) (js
 	return call(ctx, api, http.MethodPost, path, nil, body)
 }
 
+func postStatus(ctx context.Context, api *apiclient.Client, path string, body any) (int, json.RawMessage, *mcp.CallToolResult) {
+	return callStatus(ctx, api, http.MethodPost, path, nil, body)
+}
+
+// actedOrPending reports a program status only for HTTP 200.
+// HTTP 202 is a confirmation: nothing ran, and the result is the plan.
+// confirm uses this. run, stop, and restart use confirmationOnly.
+func actedOrPending(status int, payload json.RawMessage) *mcp.CallToolResult {
+	switch status {
+	case http.StatusAccepted:
+		return pendingConfirmation(payload)
+	case http.StatusOK:
+		return present(payload, summarizeProgramStatus(payload))
+	default:
+		return toolError("error", "unexpected http status")
+	}
+}
+
+// confirmationOnly accepts the 202 plan. Any other status, including 200,
+// is an error: a delegated run, stop, or restart must not be reported as done.
+func confirmationOnly(status int, payload json.RawMessage) *mcp.CallToolResult {
+	if status != http.StatusAccepted {
+		return toolError("error", "expected a confirmation")
+	}
+	return pendingConfirmation(payload)
+}
+
+// pendingConfirmation shows the plan and the confirmation id.
+// The text says nothing ran yet. The payload is not summarized as a program status.
+// Every string in the structured payload has controls replaced, and plan is capped.
+func pendingConfirmation(payload json.RawMessage) *mcp.CallToolResult {
+	payload = scrubConfirmation(payload)
+	var body struct {
+		ConfirmationID string `json:"confirmation_id"`
+		Plan           string `json:"plan"`
+		ExpiresAt      string `json:"expires_at"`
+	}
+	_ = json.Unmarshal(payload, &body)
+	var b strings.Builder
+	b.WriteString("nothing ran yet.")
+	if body.ConfirmationID != "" {
+		b.WriteString(" confirmation id ")
+		b.WriteString(summaryField(body.ConfirmationID))
+		b.WriteByte('.')
+	}
+	if body.ExpiresAt != "" {
+		b.WriteString(" Expires ")
+		b.WriteString(summaryField(body.ExpiresAt))
+		b.WriteByte('.')
+	}
+	if body.Plan != "" {
+		b.WriteByte('\n')
+		b.WriteString(clampField(body.Plan, maxPlanRunes))
+	}
+	return present(payload, b.String())
+}
+
+// scrubConfirmation replaces controls in every string and caps plan.
+// A payload with nothing to change is returned as the original bytes.
+func scrubConfirmation(raw json.RawMessage) json.RawMessage {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return raw
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return raw
+	}
+	changed := false
+	walkScrubStrings(v, &changed)
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func walkScrubStrings(v any, changed *bool) {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, child := range node {
+			s, ok := child.(string)
+			if !ok {
+				walkScrubStrings(child, changed)
+				continue
+			}
+			next := replaceControls(s)
+			if key == "plan" {
+				next = clampField(s, maxPlanRunes)
+			}
+			if next != s {
+				node[key] = next
+				*changed = true
+			}
+		}
+	case []any:
+		for i, child := range node {
+			s, ok := child.(string)
+			if !ok {
+				walkScrubStrings(child, changed)
+				continue
+			}
+			next := replaceControls(s)
+			if next != s {
+				node[i] = next
+				*changed = true
+			}
+		}
+	}
+}
+
+// replaceControls maps Cc, Cf, Zl, and Zp to U+FFFD and does not shorten the text.
+func replaceControls(s string) string {
+	n := utf8.RuneCountInString(s)
+	if n == 0 {
+		return s
+	}
+	return clampField(s, n)
+}
+
 func present(payload json.RawMessage, summary string) *mcp.CallToolResult {
-	out, note := truncateLists(payload, maxListItems)
+	out, note := truncateLists(redactLines(payload), maxListItems)
 	if note != "" {
 		summary = strings.TrimRight(summary, " ") + " " + note
 	}

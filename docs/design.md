@@ -32,7 +32,27 @@ internal/tools/       one file per tool; schemas and handlers
 | `host_snapshot` | `host_id` | POST `/v1/hosts/{id}/snapshot` |
 | `probe_service` | `service_id`, `check_id?` or `protocol`+`port`+`path?` | POST `/v1/services/{id}/probe` |
 
-Phase 2 (later wave): `service_logs`, `deploy_service`, `redeploy_service`, `run_service`, `stop_service`, `restart_service`, and `confirm` (plan → `confirmation_id` → confirm, D25).
+Phase 2 service actions (later wave): `service_logs`, `deploy_service`, `redeploy_service`, `run_service`, `stop_service`, `restart_service`. Catalog program actions are below.
+
+## Catalog tools (api-v1 v1.6, D25)
+
+Added 2026-10-15. Every call still uses only the delegated token.
+
+| Tool | Args | API |
+|---|---|---|
+| `list_catalog` | `project_id` | GET `/v1/projects/{id}/catalog` |
+| `run_entry` | `project_id`, `entry`, `host_id`, `idempotency_key` | POST `…/catalog/{entry}/run` |
+| `stop_entry` | same | POST `…/catalog/{entry}/stop` |
+| `restart_entry` | same | POST `…/catalog/{entry}/restart` |
+| `confirm` | `confirmation_id`, `idempotency_key` | POST `/v1/confirmations/{confirmation_id}` |
+| `entry_logs` | `project_id`, `entry`, `host_id`, `lines?` | POST `…/catalog/{entry}/logs` |
+| `entry_status` | `project_id`, `entry`, `host_id` | POST `…/catalog/{entry}/status` |
+
+`list_catalog` returns each item as `name`, `kind`, `command_display`, and `my_actions`. It drops `spec` (env and args) and the other catalog fields. Kept strings have control characters replaced.
+
+`run_entry`, `stop_entry`, and `restart_entry` are real and audited. They do not act. The API answers **202** `{"confirmation_id","plan","expires_at"}`. Any other status on those three tools, including 200, is a tool error (`expected a confirmation`) and is not shown as a program status. The 202 result shows the plan and the confirmation id and says nothing ran yet. Every string in that structured payload has control characters replaced, and `plan` is capped at 1024 runes. After the user agrees, `confirm` posts `{"idempotency_key"}` and returns the program status. That call contacts the host. Logs and status never need confirmation. `confirm` still accepts HTTP 200 as program status.
+
+Inputs are refused before the API call: `entry` matches `^[a-z0-9][a-z0-9-]{0,47}$`, ids are UUIDs, `idempotency_key` is 1–128 characters from `[A-Za-z0-9._:-]`, `confirmation_id` is 43 base64url characters, and `lines` is 1–1000 when set (omitted lines let the API default to 200). API errors pass through as `code: msg`. Every `lines` array (logs, and `lines` on a confirm or status payload) is redacted with the agent-protocol v1.0.3 URL pattern and then the v1.0.2 keyword pattern, each line capped at 2048 bytes, total at most 64 KiB. A shortened line or a dropped line sets `truncated`. The same 200-item list cap still applies after that.
 
 ## `deploybot login`
 
