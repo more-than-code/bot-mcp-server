@@ -80,6 +80,18 @@ func TestSummarizeServices(t *testing.T) {
 	if got := summarizeServices(dirty, true); got != "1 services, no more pages\nca\uFFFDche up\uFFFD pi\uFFFD1" {
 		t.Fatalf("dirty %q", got)
 	}
+	gone := []byte(`{"items":[
+		{"name":"api","health":{"status":"up"},"host_name":"pi1","gone_at":null},
+		{"name":"old","display_name":"Old","health":{"status":"down"},"host_name":"pi2","gone_at":"2026-10-15T14:00:00Z"}
+	],"next_cursor":null,"total":2}`)
+	wantGone := "2 services, no more pages\napi up pi1\nOld down pi2 (gone_at 2026-10-15T14:00:00Z)"
+	if got := summarizeServices(gone, true); got != wantGone {
+		t.Fatalf("gone\n got %q\nwant %q", got, wantGone)
+	}
+	wantGoneHost := "2 services\napi up\nOld down (gone_at 2026-10-15T14:00:00Z)"
+	if got := summarizeServices(gone, false); got != wantGoneHost {
+		t.Fatalf("gone host\n got %q\nwant %q", got, wantGoneHost)
+	}
 }
 
 func TestSummaryField(t *testing.T) {
@@ -197,8 +209,8 @@ func TestSummariesReplaceSeparators(t *testing.T) {
 
 	services, err := json.Marshal(map[string]any{
 		"items": []any{
-			map[string]any{"display_name": dirty, "name": "api", "host_name": dirty, "health": map[string]any{"status": dirty}},
-			map[string]any{"name": "port-22", "owner_user": dirty, "host_name": dirty, "health": map[string]any{"status": dirty}},
+			map[string]any{"display_name": dirty, "name": "api", "host_name": dirty, "health": map[string]any{"status": dirty}, "gone_at": dirty},
+			map[string]any{"name": "port-22", "owner_user": dirty, "host_name": dirty, "health": map[string]any{"status": dirty}, "gone_at": nil},
 			map[string]any{"name": dirty, "host_name": dirty, "health": map[string]any{"status": dirty}},
 		},
 	})
@@ -206,7 +218,7 @@ func TestSummariesReplaceSeparators(t *testing.T) {
 		t.Fatal(err)
 	}
 	serviceWant := "3 services, no more pages\n" +
-		clean + " " + clean + " " + clean + "\n" +
+		clean + " " + clean + " " + clean + " (gone_at " + clean + ")\n" +
 		"port 22 · " + clean + " " + clean + " " + clean + "\n" +
 		clean + " " + clean + " " + clean
 	mustSummary(t, "services", summarizeServices(services, true), serviceWant, 4)
@@ -214,6 +226,41 @@ func TestSummariesReplaceSeparators(t *testing.T) {
 	// summarizeHealth counts items and has no summaryField call site.
 	health := []byte(`{"items":[{"note":"a\nb\u2028c\u202Ed"}]}`)
 	mustSummary(t, "health", summarizeHealth(health), "1 health results", 1)
+}
+
+func TestPresentServicesKeepsGoneAt(t *testing.T) {
+	const gone = "2026-10-15T14:00:00Z"
+	payload := []byte(`{"items":[` +
+		`{"name":"api","health":{"status":"up"},"gone_at":null},` +
+		`{"name":"old","health":{"status":"down"},"gone_at":"` + gone + `"}` +
+		`],"total":2}`)
+	res := presentServices(payload, true)
+	raw, ok := res.StructuredContent.(json.RawMessage)
+	if !ok {
+		t.Fatalf("structured %T", res.StructuredContent)
+	}
+	var body struct {
+		Items []struct {
+			GoneAt json.RawMessage `json:"gone_at"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("items %d", len(body.Items))
+	}
+	if string(body.Items[0].GoneAt) != "null" {
+		t.Fatalf("null gone_at %s", body.Items[0].GoneAt)
+	}
+	if string(body.Items[1].GoneAt) != `"`+gone+`"` {
+		t.Fatalf("time gone_at %s", body.Items[1].GoneAt)
+	}
+	text := toolText(t, res)
+	lines := strings.Split(text, "\n")
+	if len(lines) != 3 || lines[1] != "api up" || lines[2] != "old down (gone_at "+gone+")" {
+		t.Fatalf("summary %q", text)
+	}
 }
 
 func TestPresentServicesTruncation(t *testing.T) {

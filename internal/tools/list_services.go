@@ -26,7 +26,8 @@ const listServicesSchema = `{
     "sort": {"type": "string", "enum": ["name", "host", "kind", "status", "last_seen"]},
     "dir": {"type": "string", "enum": ["asc", "desc"]},
     "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-    "cursor": {"type": "string"}
+    "cursor": {"type": "string"},
+    "view": {"type": "string", "enum": ["all", "deploybot", "deploybot_and_discovered"]}
   },
   "oneOf": [
     {"required": ["host_id"]},
@@ -40,7 +41,8 @@ const listServicesSchema = `{
         {"required": ["sort"]},
         {"required": ["dir"]},
         {"required": ["limit"]},
-        {"required": ["cursor"]}
+        {"required": ["cursor"]},
+        {"required": ["view"]}
       ]
     }
   }
@@ -54,12 +56,13 @@ type listServicesArgs struct {
 	Dir       *string `json:"dir"`
 	Limit     *int    `json:"limit"`
 	Cursor    *string `json:"cursor"`
+	View      *string `json:"view"`
 }
 
 func registerListServices(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_services",
-		Description: "List services on a host or in a project. With host_id, read stored service records on that host, including the last known health status. With project_id, results are paged (next_cursor, prev_cursor, total) and limited to what that project may see. Optional q (at most 100 characters), sort (name, host, kind, status, last_seen), dir (asc or desc), limit (1–200) and cursor apply only with project_id. Results are limited to what the caller's projects may see. Does not contact the host.",
+		Description: "List services on a host or in a project. With host_id, read stored service records on that host, including the last known health status. With project_id, results are paged (next_cursor, prev_cursor, total) and limited to what that project may see. Optional q (at most 100 characters), sort (name, host, kind, status, last_seen), dir (asc or desc), limit (1–200), cursor, and view apply only with project_id. view is all (every row; omit view to leave the API default all), deploybot (source owned or declared, gone or not), or deploybot_and_discovered (those rows plus discovered rows the host still reports). gone_at set means the host no longer reports the service (a stopped program or a listener that went away); null means the latest report still includes it. Results are limited to what the caller's projects may see. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(listServicesSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
@@ -108,7 +111,7 @@ func validateListServices(in listServicesArgs) (bool, url.Values, error) {
 			return false, nil, err
 		}
 		if listServiceQuerySet(in) {
-			return false, nil, errors.New("q, sort, dir, limit, and cursor are only allowed with project_id")
+			return false, nil, errors.New("q, sort, dir, limit, cursor, and view are only allowed with project_id")
 		}
 		return false, nil, nil
 	}
@@ -123,12 +126,21 @@ func validateListServices(in listServicesArgs) (bool, url.Values, error) {
 }
 
 func listServiceQuerySet(in listServicesArgs) bool {
-	return in.Q != nil || in.Sort != nil || in.Dir != nil || in.Limit != nil || in.Cursor != nil
+	return in.Q != nil || in.Sort != nil || in.Dir != nil || in.Limit != nil || in.Cursor != nil || in.View != nil
 }
 
 func validServiceSort(s string) bool {
 	switch s {
 	case "name", "host", "kind", "status", "last_seen":
+		return true
+	default:
+		return false
+	}
+}
+
+func validServiceView(s string) bool {
+	switch s {
+	case "all", "deploybot", "deploybot_and_discovered":
 		return true
 	default:
 		return false
@@ -144,6 +156,9 @@ func projectServiceQuery(in listServicesArgs) (url.Values, error) {
 	}
 	if in.Dir != nil && *in.Dir != "asc" && *in.Dir != "desc" {
 		return nil, errors.New("dir must be asc or desc")
+	}
+	if in.View != nil && !validServiceView(*in.View) {
+		return nil, errors.New("view must be all, deploybot, or deploybot_and_discovered")
 	}
 	if in.Limit != nil && (*in.Limit < 1 || *in.Limit > 200) {
 		return nil, errors.New("limit must be between 1 and 200")
@@ -163,6 +178,9 @@ func projectServiceQuery(in listServicesArgs) (url.Values, error) {
 	}
 	if in.Cursor != nil {
 		query.Set("cursor", *in.Cursor)
+	}
+	if in.View != nil {
+		query.Set("view", *in.View)
 	}
 	if len(query) == 0 {
 		return nil, nil

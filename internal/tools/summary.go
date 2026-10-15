@@ -130,6 +130,7 @@ func summarizeServices(payload json.RawMessage, project bool) string {
 			Health      struct {
 				Status string `json:"status"`
 			} `json:"health"`
+			GoneAt *string `json:"gone_at"`
 		} `json:"items"`
 		NextCursor *string `json:"next_cursor"`
 		Total      *int    `json:"total"`
@@ -164,6 +165,11 @@ func summarizeServices(payload json.RawMessage, project bool) string {
 		host := summaryField(s.HostName)
 		if project && host != "" {
 			line += " " + host
+		}
+		// A non-empty gone_at is when the host stopped reporting the service.
+		// Null stays off the line; the health status is still the status.
+		if s.GoneAt != nil && *s.GoneAt != "" {
+			line += " (gone_at " + summaryField(*s.GoneAt) + ")"
 		}
 		lines = append(lines, line)
 	}

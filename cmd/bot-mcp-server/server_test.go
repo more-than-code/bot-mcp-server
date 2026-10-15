@@ -227,6 +227,11 @@ func TestTools(t *testing.T) {
 				"total",
 				"limited to what that project may see",
 				"Results are limited to what the caller's projects may see.",
+				"cursor, and view apply only with project_id",
+				"view is all (every row; omit view to leave the API default all)",
+				"deploybot (source owned or declared, gone or not)",
+				"deploybot_and_discovered (those rows plus discovered rows the host still reports)",
+				"gone_at set means the host no longer reports the service (a stopped program or a listener that went away)",
 			} {
 				if !strings.Contains(tool.Description, phrase) {
 					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
@@ -358,9 +363,11 @@ func TestListServicesProject(t *testing.T) {
 
 	res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID})
 	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "", "")
-	if textOf(t, res) != "5 services, more pages\nport 8080 · ada up pi1\nCache down pi2" {
+	if textOf(t, res) != "5 services, more pages\nport 8080 · ada up pi1\nCache down pi2 (gone_at 2026-10-15T14:13:00Z)" {
 		t.Fatalf("text %q", textOf(t, res))
 	}
+	assertServiceGoneAt(t, res, 0, nil)
+	assertServiceGoneAt(t, res, 1, "2026-10-15T14:13:00Z")
 
 	q := "a b&100%"
 	cursor := "x/y"
@@ -385,6 +392,110 @@ func TestListServicesProject(t *testing.T) {
 
 	if logsContainSecret(logs.String()) {
 		t.Fatal("secret material appeared in logs")
+	}
+}
+
+func TestListServicesView(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+
+	listed, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	for _, tool := range listed.Tools {
+		if tool.Name != "list_services" {
+			continue
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if schema == nil {
+		t.Fatal("list_services schema missing")
+	}
+	props, _ := schema["properties"].(map[string]any)
+	view, _ := props["view"].(map[string]any)
+	enum, _ := view["enum"].([]any)
+	wantEnum := []any{"all", "deploybot", "deploybot_and_discovered"}
+	if !reflect.DeepEqual(enum, wantEnum) {
+		t.Fatalf("view enum %#v", enum)
+	}
+	then, _ := schema["then"].(map[string]any)
+	not, _ := then["not"].(map[string]any)
+	anyOf, _ := not["anyOf"].([]any)
+	forbidsView := false
+	for _, item := range anyOf {
+		clause, _ := item.(map[string]any)
+		req, _ := clause["required"].([]any)
+		if len(req) == 1 && req[0] == "view" {
+			forbidsView = true
+		}
+	}
+	if !forbidsView {
+		t.Fatalf("schema does not reject view with host_id: %#v", schema["then"])
+	}
+
+	res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID})
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "", "")
+	if strings.Contains(fake.last().RawQuery, "view") {
+		t.Fatalf("omitted view was sent %q", fake.last().RawQuery)
+	}
+	assertServiceGoneAt(t, res, 0, nil)
+	assertServiceGoneAt(t, res, 1, "2026-10-15T14:13:00Z")
+
+	res = mustCall(t, cs, "list_services", map[string]any{"host_id": hostID})
+	assertTool(t, fake, res, http.MethodGet, "/v1/hosts/"+hostID+"/services", "", "")
+	assertServiceGoneAt(t, res, 0, nil)
+	if textOf(t, res) != "1 services\napi up" {
+		t.Fatalf("null gone_at changed the summary %q", textOf(t, res))
+	}
+
+	for _, view := range []string{"all", "deploybot", "deploybot_and_discovered"} {
+		t.Run("view "+view, func(t *testing.T) {
+			res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "view": view})
+			assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "view="+view, "")
+		})
+	}
+
+	res = mustCall(t, cs, "list_services", map[string]any{
+		"project_id": projectID, "q": "api", "sort": "name", "view": "deploybot",
+	})
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "q=api&sort=name&view=deploybot", "")
+
+	res = mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "sort": "name"})
+	assertTool(t, fake, res, http.MethodGet, "/v1/projects/"+projectID+"/services", "sort=name", "")
+	if strings.Contains(fake.last().RawQuery, "view") {
+		t.Fatalf("view sent without the argument %q", fake.last().RawQuery)
+	}
+
+	t.Run("host view", func(t *testing.T) {
+		before := fake.count()
+		res := mustCall(t, cs, "list_services", map[string]any{"host_id": hostID, "view": "deploybot"})
+		if !res.IsError || textOf(t, res) != "bad_request: q, sort, dir, limit, cursor, and view are only allowed with project_id" {
+			t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+		}
+		if fake.count() != before {
+			t.Fatal("api was called")
+		}
+	})
+	for _, bad := range []string{"bogus", "ALL", "all ", ""} {
+		t.Run("bad view "+bad, func(t *testing.T) {
+			before := fake.count()
+			res := mustCall(t, cs, "list_services", map[string]any{"project_id": projectID, "view": bad})
+			if !res.IsError || textOf(t, res) != "bad_request: view must be all, deploybot, or deploybot_and_discovered" {
+				t.Fatalf("error=%v text %q", res.IsError, textOf(t, res))
+			}
+			if fake.count() != before {
+				t.Fatal("api was called")
+			}
+		})
 	}
 }
 
@@ -586,7 +697,9 @@ func TestInputValidationSkipsAPI(t *testing.T) {
 		{name: "services host dir", tool: "list_services", args: map[string]any{"host_id": hostID, "dir": "asc"}},
 		{name: "services host limit", tool: "list_services", args: map[string]any{"host_id": hostID, "limit": 10}},
 		{name: "services host cursor", tool: "list_services", args: map[string]any{"host_id": hostID, "cursor": "x"}},
+		{name: "services host view", tool: "list_services", args: map[string]any{"host_id": hostID, "view": "all"}},
 		{name: "services sort", tool: "list_services", args: map[string]any{"project_id": projectID, "sort": "cpu"}},
+		{name: "services view", tool: "list_services", args: map[string]any{"project_id": projectID, "view": "bogus"}},
 		{name: "services dir", tool: "list_services", args: map[string]any{"project_id": projectID, "dir": "up"}},
 		{name: "services limit low", tool: "list_services", args: map[string]any{"project_id": projectID, "limit": 0}},
 		{name: "services limit high", tool: "list_services", args: map[string]any{"project_id": projectID, "limit": 201}},
@@ -1380,6 +1493,7 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 		return http.StatusOK, "ok", "", map[string]any{
 			"items": []any{map[string]any{
 				"id": serviceID, "name": "api", "health": map[string]any{"status": "up"},
+				"gone_at": nil,
 			}},
 			"next_cursor": nil,
 		}
@@ -1392,6 +1506,7 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 					"host_name":    "pi1",
 					"host_status":  "online",
 					"project_name": "lab",
+					"gone_at":      nil,
 				},
 				map[string]any{
 					"id": "77777777-7777-4777-8777-777777777777", "name": "redis", "display_name": "Cache", "owner_user": nil,
@@ -1399,6 +1514,7 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 					"host_name":    "pi2",
 					"host_status":  "online",
 					"project_name": "lab",
+					"gone_at":      "2026-10-15T14:13:00Z",
 				},
 			},
 			"next_cursor": "next/1",
@@ -1759,6 +1875,25 @@ func assertPayload(t *testing.T, res *mcp.CallToolResult, payload json.RawMessag
 	}
 	if !reflect.DeepEqual(decoded, want) {
 		t.Fatalf("structured content\n got %s\nwant %s", got, payload)
+	}
+}
+
+func assertServiceGoneAt(t *testing.T, res *mcp.CallToolResult, index int, want any) {
+	t.Helper()
+	items, ok := structuredMap(t, res)["items"].([]any)
+	if !ok || index >= len(items) {
+		t.Fatalf("items %#v", structuredMap(t, res)["items"])
+	}
+	row, ok := items[index].(map[string]any)
+	if !ok {
+		t.Fatalf("item %d %T", index, items[index])
+	}
+	got, ok := row["gone_at"]
+	if !ok {
+		t.Fatalf("item %d dropped gone_at %#v", index, row)
+	}
+	if got != want {
+		t.Fatalf("item %d gone_at %#v, want %#v", index, got, want)
 	}
 }
 
