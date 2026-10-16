@@ -230,7 +230,7 @@ func TestTools(t *testing.T) {
 				"Results are limited to what the caller's projects may see.",
 				"cursor, and view apply only with project_id",
 				"view is all (every row; omit view to leave the API default all)",
-				"deploybot (source owned or declared, gone or not)",
+				"deploybot (source owned or declared, gone or not, except a gone owned row whose catalog entry was deleted, which only all lists)",
 				"deploybot_and_discovered (those rows plus discovered rows the host still reports)",
 				"gone_at set means the host no longer reports the service (a stopped program or a listener that went away)",
 			} {
