@@ -113,12 +113,14 @@ func TestImageStateUnknown(t *testing.T) {
 
 func TestProjectCatalogImageOmitsValues(t *testing.T) {
 	const (
-		envLeak    = "img-env-value-do-not-leak"
-		cmdLeak    = "img-cmd-do-not-leak"
-		entryLeak  = "img-entry-do-not-leak"
-		targetLeak = "img-target-do-not-leak"
-		secretLeak = "img-secret-ref-do-not-leak"
-		userLeak   = "img-user-do-not-leak"
+		envLeak         = "img-env-value-do-not-leak"
+		cmdLeak         = "img-cmd-do-not-leak"
+		entryLeak       = "img-entry-do-not-leak"
+		targetLeak      = "img-target-do-not-leak"
+		secretLeak      = "img-secret-ref-do-not-leak"
+		userLeak        = "img-user-do-not-leak"
+		fileTargetLeak  = "img-file-target-do-not-leak"
+		fileContentLeak = "img-file-content-do-not-leak"
 	)
 	raw := []byte(`{"items":[
 		{"id":"88888888-8888-4888-8888-888888888888","name":"tra-backend","kind":"program",
@@ -133,6 +135,7 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 		   "secret_env":{"DB_URL":"` + secretLeak + `"},
 		   "env_sets":["base","web"],
 		   "volumes":[{"name":"webdata","target":"` + targetLeak + `","read_only":true},{"name":"services","target":"/var"}],
+		   "files":[{"file":"fcm.json","target":"` + fileTargetLeak + `","content":"` + fileContentLeak + `"}],
 		   "restart":"unless-stopped","memory_mb":256,"timeout_sec":120},
 		 "my_actions":["deploy","logs","status"]}
 	]}`)
@@ -141,7 +144,7 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(out)
-	for _, leak := range []string{envLeak, cmdLeak, entryLeak, targetLeak, secretLeak, userLeak, "s3cret", "raw-token", "DATABASE_URL", "unless-stopped"} {
+	for _, leak := range []string{envLeak, cmdLeak, entryLeak, targetLeak, fileTargetLeak, fileContentLeak, secretLeak, userLeak, "s3cret", "raw-token", "DATABASE_URL", "unless-stopped"} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("kept %s in %s", leak, text)
 		}
@@ -184,6 +187,10 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 	vols, _ := img["volumes"].([]any)
 	if len(vols) != 2 || vols[0] != "webdata" || vols[1] != "services" {
 		t.Fatalf("volumes %#v", img["volumes"])
+	}
+	files, _ := img["files"].([]any)
+	if len(files) != 1 || files[0] != "fcm.json" {
+		t.Fatalf("files %#v", img["files"])
 	}
 	ports, _ := img["ports"].([]any)
 	port, _ := ports[0].(map[string]any)
