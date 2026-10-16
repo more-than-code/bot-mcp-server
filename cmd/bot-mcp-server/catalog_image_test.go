@@ -615,7 +615,7 @@ func TestDeployTimeoutText(t *testing.T) {
 }
 
 func TestImageCallDeadlines(t *testing.T) {
-	if apiclient.Timeout != 35*time.Second || apiclient.MaxCallTimeout != 4000*time.Second {
+	if apiclient.Timeout != 35*time.Second || apiclient.MaxCallTimeout != 50*time.Second {
 		t.Fatalf("timeouts default %s max %s", apiclient.Timeout, apiclient.MaxCallTimeout)
 	}
 	fake := &fakeAPI{token: userToken, images: true}
@@ -748,7 +748,7 @@ func TestImageCallDeadlines(t *testing.T) {
 		}
 	})
 	check("service catalog", http.MethodGet, catalogPath, apiclient.Timeout, hits)
-	check("service confirm", http.MethodPost, confirmPath, 990*time.Second, hits)
+	check("service confirm", http.MethodPost, confirmPath, apiclient.MaxCallTimeout, hits)
 	assertLast(t, fake, http.MethodPost, confirmPath, "", `{"idempotency_key":"confirm-svc"}`)
 
 	hits = step(func() {
@@ -760,7 +760,7 @@ func TestImageCallDeadlines(t *testing.T) {
 			t.Fatalf("job confirm %s", textOf(t, res))
 		}
 	})
-	check("job confirm", http.MethodPost, confirmPath, 510*time.Second, hits)
+	check("job confirm", http.MethodPost, confirmPath, apiclient.MaxCallTimeout, hits)
 
 	hits = step(func() {
 		res := mustCall(t, cs, "confirm", map[string]any{
@@ -881,7 +881,7 @@ func TestLongConfirmExtendsWriteDeadline(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("service confirm %s", textOf(t, res))
 	}
-	if len(got) != 1 || !nearBudget(got[0], 990*time.Second+writeTimeout) {
+	if len(got) != 1 || !nearBudget(got[0], apiclient.MaxCallTimeout+writeTimeout) {
 		t.Fatalf("service write deadline %s", got)
 	}
 

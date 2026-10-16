@@ -25,7 +25,7 @@ const confirmSchema = `{
 func registerConfirm(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "confirm",
-		Description: "Perform a pending catalog run, stop, restart, deploy, or rollback after the user agrees. The action is real and is audited. This contacts the host now. A program confirm waits up to 30 seconds. For a deploy or rollback, pass project_id and entry so the wait matches that entry; it reaches 4000 seconds only when the entry is not known. Returns the program status, or for an image the outcome, short digest, exit code, and last log lines. If a deploy or rollback wait times out, the action may still be running on the host; check entry_status later.",
+		Description: "Perform a pending catalog run, stop, restart, deploy, or rollback after the user agrees. The action is real and is audited. This contacts the host now. Pass the same idempotency_key as the run, stop, restart, deploy_entry, or rollback_entry call that returned this confirmation; a different key is refused and nothing runs. A program confirm waits up to 30 seconds. For a deploy or rollback, pass project_id and entry; the confirm waits up to 50 seconds. Returns the program status, or for an image the outcome, short digest, exit code, and last log lines. A deploy or rollback still going after 50 seconds keeps running on the host: the result is \"still running on the host\"; check entry_status for the outcome.",
 		Annotations: mutatingAnnotations(true),
 		InputSchema: json.RawMessage(confirmSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {

@@ -22,10 +22,11 @@ import (
 // leaves a few seconds for the hop.
 const Timeout = 35 * time.Second
 
-// MaxCallTimeout is the deadline for a deploy or rollback whose catalog
-// entry is not known. It covers the longest job the API allows (300s pull,
-// 3600s job, 90s slack), rounded up. It is not the default.
-const MaxCallTimeout = 4000 * time.Second
+// MaxCallTimeout is the longest an image deploy or rollback confirm waits.
+// MCP clients end tool calls after about a minute, so a longer wait only
+// turns into a transport error; the API finishes the action anyway. It is
+// not the default.
+const MaxCallTimeout = 50 * time.Second
 
 // ErrDeadline means the per-call deadline fired. The text is fixed and
 // carries no URL, so a tool can show its own message.

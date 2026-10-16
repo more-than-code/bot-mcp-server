@@ -8,23 +8,12 @@ import (
 	"github.com/more-than-code/bot-mcp-server/internal/apiclient"
 )
 
-// Deploy waits are the budgets for the confirm call that runs the action.
-// A service uses the maximum: 300s pull + 600s healthy_after + 90s slack.
-// A stored service spec includes timeout_sec 0; that unused field is ignored.
-// A job uses 300s + timeout_sec + 90s. A stored job spec includes
-// healthy_after_sec 0; that unused field is ignored.
-// An unknown entry uses MaxCallTimeout.
+// An image deploy or rollback confirm waits at most apiclient.MaxCallTimeout
+// (50s), then reports "still running on the host". The API keeps the action
+// running after the call ends (a context without cancel), so a long pull or
+// health wait finishes on the host and entry_status shows the result. MCP
+// clients cut tool calls long before a 990s pull + health budget would end.
 // A known program keeps the default client timeout.
-const (
-	deployPullBudget    = 300 * time.Second
-	deployHealthMax     = 600 * time.Second
-	deploySlack         = 90 * time.Second
-	deployServiceBudget = deployPullBudget + deployHealthMax + deploySlack
-	defaultJobTimeout   = 600
-	minJobTimeout       = 10
-	maxJobTimeout       = 3600
-)
-
 // confirmWait is the deadline for POST /v1/confirmations/{id}.
 // deploy is false for a known program: use the default timeout and the
 // generic API error. deploy is true when this confirm runs an image action.
@@ -49,41 +38,15 @@ func waitFromCatalog(raw json.RawMessage, entry string) confirmWait {
 		Items []struct {
 			Name string `json:"name"`
 			Kind string `json:"kind"`
-			Spec struct {
-				Kind       string `json:"kind"`
-				TimeoutSec *int   `json:"timeout_sec"`
-			} `json:"spec"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return confirmWait{limit: apiclient.MaxCallTimeout, deploy: true}
 	}
 	for _, item := range body.Items {
-		if item.Name != entry {
-			continue
-		}
-		if item.Kind != "image" {
+		if item.Name == entry && item.Kind != "image" {
 			return confirmWait{limit: apiclient.Timeout, deploy: false}
-		}
-		switch item.Spec.Kind {
-		case "service":
-			return confirmWait{limit: deployServiceBudget, deploy: true}
-		case "job":
-			return confirmWait{limit: jobBudget(item.Spec.TimeoutSec), deploy: true}
-		default:
-			return confirmWait{limit: apiclient.MaxCallTimeout, deploy: true}
 		}
 	}
 	return confirmWait{limit: apiclient.MaxCallTimeout, deploy: true}
-}
-
-func jobBudget(timeoutSec *int) time.Duration {
-	sec := defaultJobTimeout
-	if timeoutSec != nil {
-		sec = *timeoutSec
-	}
-	if sec < minJobTimeout || sec > maxJobTimeout {
-		return apiclient.MaxCallTimeout
-	}
-	return deployPullBudget + time.Duration(sec)*time.Second + deploySlack
 }

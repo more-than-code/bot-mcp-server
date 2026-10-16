@@ -3,7 +3,6 @@ package tools
 import (
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,53 +11,33 @@ import (
 )
 
 func TestBudgetFromCatalog(t *testing.T) {
-	if deployServiceBudget != 990*time.Second {
-		t.Fatalf("service budget %s", deployServiceBudget)
-	}
-	if apiclient.MaxCallTimeout != 4000*time.Second {
-		t.Fatalf("unknown budget %s", apiclient.MaxCallTimeout)
+	if apiclient.MaxCallTimeout != 50*time.Second {
+		t.Fatalf("image confirm budget %s", apiclient.MaxCallTimeout)
 	}
 	raw := func(items ...string) json.RawMessage {
 		return json.RawMessage(`{"items":[` + strings.Join(items, ",") + `]}`)
 	}
-	svc := `{"name":"webadmin","kind":"image","spec":{"kind":"service","healthy_after_sec":5,"timeout_sec":10}}`
-	if got := waitFromCatalog(raw(svc), "webadmin"); got.limit != deployServiceBudget || !got.deploy {
-		t.Fatalf("service %+v", got)
-	}
-	nilJob := `{"name":"webjob","kind":"image","spec":{"kind":"job"}}`
-	if got := waitFromCatalog(raw(nilJob), "webjob"); got.limit != deployServiceBudget || !got.deploy {
-		t.Fatalf("default job %+v", got)
-	}
-	cases := []struct {
-		sec  int
-		want time.Duration
+	// Every image entry, whatever its kind or timers, waits the same 50s.
+	svc := `{"name":"webadmin","kind":"image","spec":{"kind":"service","healthy_after_sec":600,"timeout_sec":10}}`
+	job := `{"name":"webjob","kind":"image","spec":{"kind":"job","timeout_sec":3600}}`
+	other := `{"name":"webother","kind":"image","spec":{"kind":"other"}}`
+	for _, tc := range []struct {
+		items json.RawMessage
+		entry string
 	}{
-		{sec: 10, want: 400 * time.Second},
-		{sec: 120, want: 510 * time.Second},
-		{sec: 3600, want: 3990 * time.Second},
-		{sec: 9, want: apiclient.MaxCallTimeout},
-		{sec: 3601, want: apiclient.MaxCallTimeout},
-	}
-	for _, tc := range cases {
-		item := `{"name":"webjob","kind":"image","spec":{"kind":"job","timeout_sec":` + strconv.Itoa(tc.sec) + `}}`
-		got := waitFromCatalog(raw(item), "webjob")
-		if got.limit != tc.want || !got.deploy {
-			t.Fatalf("timeout_sec %d budget %+v want %s", tc.sec, got, tc.want)
+		{raw(svc), "webadmin"},
+		{raw(job), "webjob"},
+		{raw(other), "webother"},
+		{raw(svc), "missing"},
+		{json.RawMessage(`{`), "webadmin"},
+	} {
+		if got := waitFromCatalog(tc.items, tc.entry); got.limit != apiclient.MaxCallTimeout || !got.deploy {
+			t.Fatalf("%s %+v", tc.entry, got)
 		}
 	}
 	program := `{"name":"tra-backend","kind":"program","spec":{"kind":"job","timeout_sec":120}}`
 	if got := waitFromCatalog(raw(program), "tra-backend"); got.deploy || got.limit != apiclient.Timeout {
 		t.Fatalf("program %+v", got)
-	}
-	other := `{"name":"webadmin","kind":"image","spec":{"kind":"other"}}`
-	if got := waitFromCatalog(raw(other), "webadmin"); got.limit != apiclient.MaxCallTimeout || !got.deploy {
-		t.Fatalf("kind %+v", got)
-	}
-	if got := waitFromCatalog(raw(svc), "missing"); got.limit != apiclient.MaxCallTimeout || !got.deploy {
-		t.Fatalf("missing %+v", got)
-	}
-	if got := waitFromCatalog(json.RawMessage(`{`), "webadmin"); got.limit != apiclient.MaxCallTimeout || !got.deploy {
-		t.Fatalf("bad json %+v", got)
 	}
 }
 
@@ -70,13 +49,10 @@ func TestStoredZeroTimers(t *testing.T) {
 		{"name":"webjob","kind":"image","command_display":"ghcr.io/example/webjob:1",
 		 "spec":{"kind":"job","image":"ghcr.io/example/webjob:1","healthy_after_sec":0,"timeout_sec":120,"env":{"NODE_ENV":"` + leak + `"}}}
 	]}`)
-	svc := waitFromCatalog(raw, "webadmin")
-	if svc.limit != deployServiceBudget || !svc.deploy {
-		t.Fatalf("service timeout_sec 0 %+v", svc)
-	}
-	job := waitFromCatalog(raw, "webjob")
-	if job.limit != 510*time.Second || !job.deploy {
-		t.Fatalf("job healthy_after_sec 0 %+v", job)
+	for _, entry := range []string{"webadmin", "webjob"} {
+		if got := waitFromCatalog(raw, entry); got.limit != apiclient.MaxCallTimeout || !got.deploy {
+			t.Fatalf("%s %+v", entry, got)
+		}
 	}
 	out, err := projectCatalog(raw)
 	if err != nil {
