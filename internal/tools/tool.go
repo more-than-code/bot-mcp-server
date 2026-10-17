@@ -1,6 +1,6 @@
 // Package tools registers the MCP tools. Each tool calls bot-api-server with
 // the delegated token for this request. The caller's token is never sent.
-// Catalog run, stop, restart, deploy, and rollback do not act until confirm.
+// Catalog run, stop, restart, deploy, rollback, and set_health_checks do not act until confirm.
 package tools
 
 import (
@@ -39,12 +39,14 @@ func Register(server *mcp.Server, api *apiclient.Client) {
 	registerServiceHealthHistory(server, api)
 	registerHostSnapshot(server, api)
 	registerProbeService(server, api)
+	registerGetHealthChecks(server, api)
 	registerListCatalog(server, api)
 	registerRunEntry(server, api)
 	registerStopEntry(server, api)
 	registerRestartEntry(server, api)
 	registerDeployEntry(server, api)
 	registerRollbackEntry(server, api)
+	registerSetHealthChecks(server, api)
 	registerConfirm(server, api)
 	registerEntryLogs(server, api)
 	registerEntryStatus(server, api)
@@ -75,8 +77,8 @@ func readOnlyAnnotations(openWorld bool) *mcp.ToolAnnotations {
 }
 
 // mutatingAnnotations marks a tool that changes a host. openWorld is false
-// for run, stop, restart, deploy, and rollback: those calls do not act.
-// confirm sets it true because that call contacts the host.
+// for run, stop, restart, deploy, rollback, and set_health_checks: those
+// calls do not act. confirm sets it true because that call contacts the host.
 func mutatingAnnotations(openWorld bool) *mcp.ToolAnnotations {
 	open := openWorld
 	destructive := true
@@ -157,6 +159,10 @@ func postStatus(ctx context.Context, api *apiclient.Client, path string, body an
 	return callStatus(ctx, api, http.MethodPost, path, nil, body)
 }
 
+func putStatus(ctx context.Context, api *apiclient.Client, path string, body any) (int, json.RawMessage, *mcp.CallToolResult) {
+	return callStatus(ctx, api, http.MethodPut, path, nil, body)
+}
+
 // postWithin is postStatus with a per-call deadline. A deadline is reported
 // as still running on the host. Only confirm uses it, and only for an image
 // deploy or rollback. Other calls keep the default deadline and the generic
@@ -196,6 +202,16 @@ func actedOrPending(status int, payload json.RawMessage) *mcp.CallToolResult {
 	case http.StatusAccepted:
 		return pendingConfirmation(payload)
 	case http.StatusOK:
+		if projected, ok, err := projectHealthChecks(payload); ok {
+			if err != nil {
+				return toolError("error", errHealthChecksShape.Error())
+			}
+			summary, sumOK := summarizeHealthChecks(projected)
+			if !sumOK {
+				return toolError("error", errHealthChecksShape.Error())
+			}
+			return present(projected, summary)
+		}
 		payload = redactLines(payload)
 		payload = projectDeployResult(payload)
 		if imageStateRejected(payload) {
@@ -219,19 +235,41 @@ func confirmationOnly(status int, payload json.RawMessage) *mcp.CallToolResult {
 // errConfirmationShape is fixed. It must not include the confirmation body.
 var errConfirmationShape = errors.New("confirmation response was not usable")
 
+// errPlanTooLong is fixed. The plan text is not copied into the tool error.
+var errPlanTooLong = errors.New("plan too long")
+
 // errStatusShape is fixed. It must not include the status body or the state.
 var errStatusShape = errors.New("status response was not usable")
+
+// confirmationHealth is confirmationOnly with the health-check plan cap.
+// A plan longer than that cap is an error. It is not shortened.
+func confirmationHealth(status int, payload json.RawMessage) *mcp.CallToolResult {
+	if status != http.StatusAccepted {
+		return toolError("error", "expected a confirmation")
+	}
+	return pendingHealthConfirmation(payload)
+}
 
 // pendingConfirmation shows the plan and the confirmation id.
 // The text says nothing ran yet. The payload is not summarized as a program status.
 // The structured result is an allowlist: confirmation_id, plan, expires_at,
 // history, and force when it is true. plan is redacted and capped.
 func pendingConfirmation(payload json.RawMessage) *mcp.CallToolResult {
-	projected, err := projectConfirmation(payload)
+	return finishConfirmation(projectConfirmation(payload))
+}
+
+func pendingHealthConfirmation(payload json.RawMessage) *mcp.CallToolResult {
+	return finishConfirmation(projectConfirmationLimited(payload, false))
+}
+
+func finishConfirmation(projected json.RawMessage, err error) *mcp.CallToolResult {
+	if errors.Is(err, errPlanTooLong) {
+		return toolError("error", "plan too long to show; send fewer checks")
+	}
 	if err != nil {
 		return toolError("error", errConfirmationShape.Error())
 	}
-	payload = projected
+	payload := projected
 	var body struct {
 		ConfirmationID string `json:"confirmation_id"`
 		Plan           string `json:"plan"`
@@ -263,6 +301,13 @@ func pendingConfirmation(payload json.RawMessage) *mcp.CallToolResult {
 // and force when true. plan is redacted, then capped. force: true is part of
 // the plan string. Anything else in the body is dropped. A non-object is an error.
 func projectConfirmation(raw json.RawMessage) (json.RawMessage, error) {
+	return projectConfirmationLimited(raw, true)
+}
+
+// projectConfirmationLimited is projectConfirmation.
+// clamp false is the set_health_checks plan: redact and keep it up to
+// maxHealthPlanRunes, or errPlanTooLong. It is not cut to maxPlanRunes.
+func projectConfirmationLimited(raw json.RawMessage, clamp bool) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return nil, errConfirmationShape
@@ -283,16 +328,35 @@ func projectConfirmation(raw json.RawMessage) (json.RawMessage, error) {
 	plan, _ := body["plan"].(string)
 	plan = redactText(plan)
 	force, _ := body["force"].(bool)
-	if force {
-		room := maxPlanRunes - len([]rune("\nforce: true"))
-		if plan == "" {
-			plan = "force: true"
+	limit := maxPlanRunes
+	if !clamp {
+		limit = maxHealthPlanRunes
+	}
+	if clamp {
+		if force {
+			room := limit - len([]rune("\nforce: true"))
+			if plan == "" {
+				plan = "force: true"
+			} else {
+				plan = clampField(plan, room) + "\nforce: true"
+			}
+			out["force"] = true
 		} else {
-			plan = clampField(plan, room) + "\nforce: true"
+			plan = clampField(plan, limit)
 		}
-		out["force"] = true
 	} else {
-		plan = clampField(plan, maxPlanRunes)
+		plan = clampField(plan, max(len([]rune(plan)), 1))
+		if force {
+			if plan == "" {
+				plan = "force: true"
+			} else {
+				plan += "\nforce: true"
+			}
+			out["force"] = true
+		}
+		if len([]rune(plan)) > limit {
+			return nil, errPlanTooLong
+		}
 	}
 	if plan != "" {
 		out["plan"] = plan

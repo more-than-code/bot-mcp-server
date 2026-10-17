@@ -164,7 +164,7 @@ func TestTools(t *testing.T) {
 	closed := map[string]bool{
 		"list_projects": true, "list_hosts": true, "list_services": true,
 		"query_metrics": true, "list_processes": true, "service_health_history": true,
-		"list_catalog": true,
+		"get_health_checks": true, "list_catalog": true,
 	}
 	live := map[string]bool{
 		"host_snapshot": true, "probe_service": true,
@@ -188,6 +188,22 @@ func TestTools(t *testing.T) {
 				t.Errorf("%s readOnly=%v openWorld=%v", tool.Name, readOnly, open)
 			}
 			for _, phrase := range []string{"real", "audited", "second confirm", "user agrees", "Nothing runs"} {
+				if !strings.Contains(tool.Description, phrase) {
+					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+				}
+			}
+		case tool.Name == "set_health_checks":
+			if readOnly || open {
+				t.Errorf("%s readOnly=%v openWorld=%v", tool.Name, readOnly, open)
+			}
+			for _, phrase := range []string{
+				"all health checks",
+				"Nothing changes until confirm",
+				"user agrees",
+				"127.0.0.1",
+				"get_health_checks",
+				"replaces all checks",
+			} {
 				if !strings.Contains(tool.Description, phrase) {
 					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
 				}
@@ -260,16 +276,16 @@ func TestTools(t *testing.T) {
 	}
 	for _, name := range []string{
 		"list_projects", "list_hosts", "list_services", "query_metrics",
-		"list_processes", "service_health_history", "host_snapshot", "probe_service",
+		"list_processes", "service_health_history", "get_health_checks", "host_snapshot", "probe_service",
 		"list_catalog", "run_entry", "stop_entry", "restart_entry",
-		"deploy_entry", "rollback_entry",
+		"deploy_entry", "rollback_entry", "set_health_checks",
 		"confirm", "entry_logs", "entry_status",
 	} {
 		if !seen[name] {
 			t.Errorf("missing tool %s", name)
 		}
 	}
-	if len(seen) != 17 {
+	if len(seen) != 19 {
 		t.Fatalf("tool count %d", len(seen))
 	}
 
@@ -1354,11 +1370,32 @@ type fakeAPI struct {
 	images       bool
 	imageConfirm bool
 	confirms     int
+	plan         string
+	confirmBody  any
+	serviceBody  any
 }
 
 func (f *fakeAPI) setMode(mode string) {
 	f.mu.Lock()
 	f.mode = mode
+	f.mu.Unlock()
+}
+
+func (f *fakeAPI) setPlan(plan string) {
+	f.mu.Lock()
+	f.plan = plan
+	f.mu.Unlock()
+}
+
+func (f *fakeAPI) setConfirmBody(body any) {
+	f.mu.Lock()
+	f.confirmBody = body
+	f.mu.Unlock()
+}
+
+func (f *fakeAPI) setServiceBody(body any) {
+	f.mu.Lock()
+	f.serviceBody = body
 	f.mu.Unlock()
 }
 
@@ -1501,6 +1538,9 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 	mode := f.mode
 	images := f.images
 	imageConfirm := f.imageConfirm
+	plan := f.plan
+	confirmBody := f.confirmBody
+	serviceBody := f.serviceBody
 	f.mu.Unlock()
 	switch mode {
 	case "forbidden":
@@ -1512,6 +1552,8 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 		return http.StatusNotFound, "not_found", "no such route " + r.URL.Path, nil
 	case "unauthorized":
 		return http.StatusUnauthorized, "unauthorized", "session expired", nil
+	case "health-error":
+		return http.StatusBadRequest, "bad_request", "token=s3cret", nil
 	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/me":
@@ -1678,8 +1720,36 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 		}
 	case r.Method == http.MethodPost && catalogVerb(r.URL.Path, "status"):
 		return http.StatusOK, "ok", "", programStatusPayload()
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/services/"+serviceID:
+		if mode == "missing-service" {
+			return http.StatusNotFound, "not_found", "no such service", nil
+		}
+		if serviceBody != nil {
+			return http.StatusOK, "ok", "", serviceBody
+		}
+		return http.StatusOK, "ok", "", healthChecksServicePayload()
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/services/") && strings.HasSuffix(r.URL.Path, "/health-checks"):
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", map[string]any{"checks": []any{}}
+		}
+		shown := healthChecksPlan
+		if plan != "" {
+			shown = plan
+		}
+		return http.StatusAccepted, "ok", "", map[string]any{
+			"confirmation_id": confirmationID,
+			"plan":            shown,
+			"expires_at":      "2026-10-15T00:05:00Z",
+			"note":            "hunter2plain",
+		}
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/confirmations/"+confirmationID:
 		f.noteConfirm()
+		if mode == "health-checks" {
+			if confirmBody != nil {
+				return http.StatusOK, "ok", "", confirmBody
+			}
+			return http.StatusOK, "ok", "", healthChecksConfirmPayload()
+		}
 		if imageConfirm {
 			switch mode {
 			case "confirm-timeout":

@@ -17,6 +17,27 @@ const summaryFieldRunes = 80
 // The plan is the sentence the user must agree to, so it is longer than one field.
 const maxPlanRunes = 1024
 
+// maxHealthPlanRunes is the longest set_health_checks plan this tool shows.
+// A longer plan is an error, not a shortened sentence. Other tools keep maxPlanRunes.
+//
+// v1.10 sentence for the case this cap is sized to:
+// 10 disabled HTTP checks, port 65535, interval 300,
+// each path 512 bytes of " (strconv.Quote = 1026 runes),
+// a 64-rune label of " (strconv.Quote = 130),
+// a 63-character host, and one redundant-tcp suffix.
+//
+//	"will set 10 health checks on "                 29
+//	quoted label                                    130
+//	" (" + host + "): "                              68
+//	10 * ("http 65535 " + 1026 + " every 300 s (disabled)")
+//	   10 * 1060                                  10600
+//	9 * ", "                                         18
+//	" (tcp 65535 is redundant with http 65535)"      41
+//	total                                         10886
+//
+// A 10-HTTP set has no tcp row, so an API plan is at most 41 runes shorter.
+const maxHealthPlanRunes = 10886
+
 // summaryField replaces controls, format characters, and line or paragraph
 // separators with U+FFFD, then caps the result at summaryFieldRunes.
 // That keeps bidi overrides and Unicode line breaks out of a summary line.
