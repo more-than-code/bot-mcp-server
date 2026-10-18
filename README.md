@@ -2,7 +2,7 @@
 
 Stateless MCP gateway (Streamable HTTP at `/mcp`) for external AI agents. Every tool call is forwarded to bot-api-server with a short-lived token exchanged from the caller's user token, so permissions are exactly the console's. It also contains `deploybot login`, a device-code login CLI.
 
-- Design: `docs/design.md` and the umbrella `docs/design-bot-agent-deploy.md` §7.
+- Design: `docs/design.md`.
 - Contract (frozen): `docs/contracts/api-v1.md`.
 
 The server stores nothing and writes no files. The CLI writes only `~/.config/deploybot/token` (directory `0700`, file `0600`, atomic replace). The file is JSON, `{"api":"<base URL>","token":"<token>"}`.
@@ -21,7 +21,7 @@ go run ./cmd/bot-mcp-server
 
 `GET /health` is unauthenticated. `GET /.well-known/oauth-protected-resource` gives the resource `<BOT_MCP_PUBLIC_ORIGIN>/mcp` (the URL clients connect to; the API's `BOT_API_MCP_RESOURCE` must equal it), names the API origin as the authorization server, and lists scope `deploybot`. `POST /mcp` requires `Authorization: Bearer <token>`. The server exchanges that token and calls the API with the delegated token only.
 
-`BOT_MCP_API_URL` is an origin (`https://host[:port]`, optional trailing slash). A path, query, or fragment is refused at startup. `BOT_MCP_API_URL` and `BOT_MCP_PUBLIC_ORIGIN` must be `https`. Cleartext `http` is allowed only for `localhost`, `127.0.0.1`, and `::1`, or when `BOT_MCP_ALLOW_INSECURE_HTTP=1` (tailnet dev). The API client does not follow redirects.
+`BOT_MCP_API_URL` is an origin (`https://host[:port]`, optional trailing slash). A path, query, or fragment is refused at startup. `BOT_MCP_API_URL` and `BOT_MCP_PUBLIC_ORIGIN` must be `https`. Cleartext `http` is allowed only for `localhost`, `127.0.0.1`, and `::1`, or when `BOT_MCP_ALLOW_INSECURE_HTTP=1` (development/internal testing only). The API client does not follow redirects.
 
 Phase 1 tools are read-only: `list_projects`, `list_hosts`, `list_services`, `query_metrics`, `list_processes`, `service_health_history`, `host_snapshot`, `probe_service`. `host_snapshot` and `probe_service` contact the host when they are called.
 
@@ -33,7 +33,7 @@ Catalog image entries (api-v1 v1.8) use the same confirmation. `list_catalog` ad
 
 `get_health_checks` (`service_id`) reads `GET /v1/services/{id}`. It returns `health_checks` (id, protocol, port, path, interval, expect bounds, enabled), plus `name`, `ports`, and `health`. Other fields are dropped. It does not contact the host.
 
-`list_hosts` includes hosts shared with the project (`relation` and `share_level` pass through; a shared host is summarized as `pi1 online (shared: metrics)`). `list_services` takes `host_id` or `project_id`; with `project_id` the query (`q`, `sort`, `dir`, `limit`, `cursor`, `view`) is passed through and the result is paged and limited to what that project may see. `view` is `all` (default when omitted), `deploybot`, or `deploybot_and_discovered`. A service's `gone_at`, when set, means the host no longer reports it. `list_processes` shows the whole host.
+`list_hosts` includes hosts shared with the project (`relation` and `share_level` pass through; a shared host is summarized as `srv-01 online (shared: metrics)`). `list_services` takes `host_id` or `project_id`; with `project_id` the query (`q`, `sort`, `dir`, `limit`, `cursor`, `view`) is passed through and the result is paged and limited to what that project may see. `view` is `all` (default when omitted), `deploybot`, or `deploybot_and_discovered`. A service's `gone_at`, when set, means the host no longer reports it. `list_processes` shows the whole host.
 
 ## deploybot
 
