@@ -163,7 +163,8 @@ func summarizeServices(payload json.RawMessage, project bool) string {
 			OwnerUser   string `json:"owner_user"`
 			HostName    string `json:"host_name"`
 			Health      struct {
-				Status string `json:"status"`
+				Status string  `json:"status"`
+				Source *string `json:"source"`
 			} `json:"health"`
 			GoneAt *string `json:"gone_at"`
 		} `json:"items"`
@@ -197,6 +198,9 @@ func summarizeServices(payload json.RawMessage, project bool) string {
 			status = "unknown"
 		}
 		line := serviceLabel(s.DisplayName, s.Name, s.OwnerUser) + " " + status
+		if s.Health.Source != nil && *s.Health.Source == "docker" {
+			line += " (Docker health)"
+		}
 		host := summaryField(s.HostName)
 		if project && host != "" {
 			line += " " + host
@@ -246,10 +250,22 @@ func summarizeProcesses(payload json.RawMessage) string {
 
 func summarizeHealth(payload json.RawMessage) string {
 	var body struct {
-		Items []json.RawMessage `json:"items"`
+		Items []struct {
+			Protocol string `json:"protocol"`
+		} `json:"items"`
 	}
 	_ = json.Unmarshal(payload, &body)
-	return fmt.Sprintf("%d health results", len(body.Items))
+	docker := 0
+	for _, item := range body.Items {
+		if item.Protocol == "docker" {
+			docker++
+		}
+	}
+	text := fmt.Sprintf("%d health results", len(body.Items))
+	if docker > 0 {
+		text += fmt.Sprintf(", %d from Docker health", docker)
+	}
+	return text
 }
 
 func summarizeSnapshot(payload json.RawMessage) string {

@@ -27,7 +27,7 @@ const listCatalogSchema = `{
 func registerListCatalog(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_catalog",
-		Description: "List catalog entries in a project. Returns name, kind, command_display, and the actions the caller may take. An image entry also returns the image reference, service or job, ports, volume short names, managed file names, env key names, and env set names, and does not return env values, file contents, or file targets. Does not return the program spec or its environment. Does not contact the host.",
+		Description: "List catalog entries in a project. Returns name, kind, command_display, and the actions the caller may take. An image entry also returns the image reference, service or job, ports, volume short names, managed file names, env key names, env set names, and healthcheck true or false (not the healthcheck command), and does not return env values, file contents, or file targets. Does not return the program spec or its environment. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(listCatalogSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
@@ -56,7 +56,8 @@ func registerListCatalog(server *mcp.Server, api *apiclient.Client) {
 // projectCatalog returns only an items array of allowlisted fields.
 // A program keeps name, kind, command_display, and my_actions.
 // An image also keeps the image reference, service or job, ports, volume
-// short names, file names, env key names, and env set names. Values are not copied.
+// short names, file names, env key names, env set names, and healthcheck
+// true or false. The healthcheck command is not copied. Values are not copied.
 // Anything that is not that shape is an error. The raw body is never returned.
 func projectCatalog(raw json.RawMessage) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(raw)
@@ -127,8 +128,19 @@ func projectImageEntry(row map[string]any) map[string]any {
 		"files":           namesOf(spec["files"], "file"),
 		"env_keys":        envKeyNames(spec),
 		"env_sets":        stringList(spec["env_sets"]),
+		"healthcheck":     imageHasHealthcheck(spec),
 		"my_actions":      stringList(row["my_actions"]),
 	}
+}
+
+// imageHasHealthcheck is true only when spec.healthcheck is an object.
+// The argv and the numbers stay on the API.
+func imageHasHealthcheck(spec map[string]any) bool {
+	if spec == nil {
+		return false
+	}
+	_, ok := spec["healthcheck"].(map[string]any)
+	return ok
 }
 
 func projectPorts(v any) []any {

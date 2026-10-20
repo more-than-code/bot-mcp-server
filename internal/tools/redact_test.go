@@ -134,6 +134,27 @@ func TestRedactLinesDropsNonStringShapes(t *testing.T) {
 	}
 }
 
+func TestRedactLinesKeepsSecretPreviews(t *testing.T) {
+	raw := []byte(`{"container":"app","lines":["abcd…","••••","ready abcd… ••••","password=hunter2"],"truncated":false}`)
+	got := redactLines(raw)
+	var body struct {
+		Lines     []string `json:"lines"`
+		Truncated bool     `json:"truncated"`
+	}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Truncated || len(body.Lines) != 4 {
+		t.Fatalf("lines %#v truncated %v", body.Lines, body.Truncated)
+	}
+	if body.Lines[0] != "abcd…" || body.Lines[1] != "••••" || body.Lines[2] != "ready abcd… ••••" {
+		t.Fatalf("previews %#v", body.Lines[:3])
+	}
+	if body.Lines[3] != "password=[REDACTED]" {
+		t.Fatalf("keyword line %q", body.Lines[3])
+	}
+}
+
 func TestPresentRedactsStatusLines(t *testing.T) {
 	raw := []byte(`{"unit":"u","active_state":"failed","lines":["AWS_SECRET_ACCESS_KEY=AKIAxyz"],"truncated":false}`)
 	res := present(raw, "status")

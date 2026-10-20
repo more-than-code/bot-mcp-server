@@ -22,8 +22,26 @@ var errCatalogWriteShape = errors.New("catalog entry response was not usable")
 var imageSpecKeys = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
 	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {},
-	"restart": {}, "user": {}, "healthy_after_sec": {}, "memory_mb": {}, "timeout_sec": {},
+	"healthcheck": {}, "restart": {}, "user": {}, "healthy_after_sec": {},
+	"memory_mb": {}, "timeout_sec": {},
 }
+
+// Healthcheck bounds match api-v1 v1.11 item 7. Defaults, timeout_sec <
+// interval_sec, the job rule, and NUL checks stay with the API.
+const (
+	healthTestMin  = 1
+	healthTestMax  = 32
+	healthArgMin   = 1
+	healthArgMax   = 1024
+	healthEveryMin = 5
+	healthEveryMax = 300
+	healthWaitMin  = 1
+	healthWaitMax  = 60
+	healthTriesMin = 1
+	healthTriesMax = 10
+	healthStartMin = 0
+	healthStartMax = 600
+)
 
 const catalogWriteSchema = `{
   "type": "object",
@@ -47,6 +65,23 @@ const catalogWriteSchema = `{
         "secret_env": {"type": "object"},
         "volumes": {"type": "array"},
         "files": {"type": "array"},
+        "healthcheck": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["test"],
+          "properties": {
+            "test": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+            },
+            "interval_sec": {"type": "integer", "minimum": 5, "maximum": 300},
+            "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 60},
+            "retries": {"type": "integer", "minimum": 1, "maximum": 10},
+            "start_period_sec": {"type": "integer", "minimum": 0, "maximum": 600}
+          }
+        },
         "restart": {"type": "string"},
         "user": {"type": "string"},
         "healthy_after_sec": {"type": "integer"},
@@ -141,7 +176,9 @@ func requireCatalogName(value string) error {
 }
 
 // validateImageSpec accepts an ImageSpec object and rejects unknown keys.
-// It does not apply image rules 1–13; the API does, and names the field.
+// It checks the healthcheck shape. It does not apply image rules 1–13, fill
+// healthcheck defaults, or compare timeout_sec with interval_sec. The API does,
+// and names the field. A rejected healthcheck does not include the argv.
 func validateImageSpec(raw json.RawMessage) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -166,6 +203,104 @@ func validateImageSpec(raw json.RawMessage) error {
 		if err := json.Unmarshal(kind, &value); err != nil || (value != "service" && value != "job") {
 			return errors.New("spec.kind must be service or job")
 		}
+	}
+	if hc, ok := fields["healthcheck"]; ok {
+		if err := validateHealthcheck(hc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateHealthcheck checks the local shape. Null means the field is omitted.
+// The spec bytes are still forwarded unchanged when this returns nil.
+func validateHealthcheck(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var fields map[string]json.RawMessage
+	if err := dec.Decode(&fields); err != nil || fields == nil {
+		return errors.New("healthcheck must be an object")
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("healthcheck must be an object")
+	}
+	allowed := map[string]struct{}{
+		"test": {}, "interval_sec": {}, "timeout_sec": {}, "retries": {}, "start_period_sec": {},
+	}
+	for key := range fields {
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("unknown healthcheck field %s", key)
+		}
+	}
+	test, ok := fields["test"]
+	if !ok || bytes.Equal(bytes.TrimSpace(test), []byte("null")) {
+		return errors.New("healthcheck.test is required")
+	}
+	if err := validateHealthTest(test); err != nil {
+		return err
+	}
+	bounds := []struct {
+		key      string
+		min, max int
+	}{
+		{"interval_sec", healthEveryMin, healthEveryMax},
+		{"timeout_sec", healthWaitMin, healthWaitMax},
+		{"retries", healthTriesMin, healthTriesMax},
+		{"start_period_sec", healthStartMin, healthStartMax},
+	}
+	for _, bound := range bounds {
+		value, ok := fields[bound.key]
+		if !ok {
+			continue
+		}
+		if err := validateBoundedInt(value, "healthcheck."+bound.key, bound.min, bound.max); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateHealthTest(raw json.RawMessage) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var items []json.RawMessage
+	if err := dec.Decode(&items); err != nil {
+		return errors.New("healthcheck.test must be 1 to 32 strings")
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("healthcheck.test must be 1 to 32 strings")
+	}
+	if len(items) < healthTestMin || len(items) > healthTestMax {
+		return errors.New("healthcheck.test must be 1 to 32 strings")
+	}
+	for _, item := range items {
+		var text string
+		if err := json.Unmarshal(item, &text); err != nil {
+			return errors.New("healthcheck.test must be 1 to 32 strings")
+		}
+		if len(text) < healthArgMin || len(text) > healthArgMax {
+			return errors.New("healthcheck.test items must be 1 to 1024 bytes")
+		}
+	}
+	return nil
+}
+
+func validateBoundedInt(raw json.RawMessage, name string, min, max int) error {
+	dec := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(raw)))
+	dec.UseNumber()
+	var n json.Number
+	if err := dec.Decode(&n); err != nil {
+		return fmt.Errorf("%s must be an integer from %d to %d", name, min, max)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%s must be an integer from %d to %d", name, min, max)
+	}
+	v, err := n.Int64()
+	if err != nil || v < int64(min) || v > int64(max) {
+		return fmt.Errorf("%s must be an integer from %d to %d", name, min, max)
 	}
 	return nil
 }

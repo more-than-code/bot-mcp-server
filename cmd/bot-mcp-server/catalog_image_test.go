@@ -226,7 +226,7 @@ func TestImageCatalog(t *testing.T) {
 		t.Fatalf("command_display %q", display)
 	}
 	img, _ := items[1].(map[string]any)
-	if img["kind"] != "image" || img["image_kind"] != "service" {
+	if img["kind"] != "image" || img["image_kind"] != "service" || img["healthcheck"] != false {
 		t.Fatalf("image %#v", img)
 	}
 	if img["image"] != "ghcr.io/example/web\uFFFDadmin:latest" {
@@ -259,7 +259,7 @@ func TestImageCatalog(t *testing.T) {
 		}
 	}
 	job, _ := items[2].(map[string]any)
-	if job["image_kind"] != "job" || job["image"] != "ghcr.io/example/webjob:1" {
+	if job["image_kind"] != "job" || job["image"] != "ghcr.io/example/webjob:1" || job["healthcheck"] != false {
 		t.Fatalf("job %#v", job)
 	}
 	if logsContainSecret(logs.String()) {

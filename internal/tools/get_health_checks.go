@@ -27,7 +27,7 @@ var errServiceShape = errors.New("service response was not usable")
 func registerGetHealthChecks(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "get_health_checks",
-		Description: "Read the current health checks for a service, plus its name, ports, and health. Does not contact the host.",
+		Description: "Read the current health checks for a service, plus its name, ports, and health. health.source is docker when Docker health supplied the status, check for a Deploybot check, or null when there is no sample. latency_ms is null for Docker health. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(getHealthChecksSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
@@ -57,12 +57,19 @@ func summarizeGetHealthChecks(payload json.RawMessage) string {
 	var body struct {
 		Name   string            `json:"name"`
 		Checks []json.RawMessage `json:"health_checks"`
+		Health struct {
+			Source *string `json:"source"`
+		} `json:"health"`
 	}
 	_ = json.Unmarshal(payload, &body)
-	if body.Name == "" {
-		return fmt.Sprintf("%d health checks", len(body.Checks))
+	text := fmt.Sprintf("%d health checks", len(body.Checks))
+	if body.Name != "" {
+		text = fmt.Sprintf("%d health checks on %s", len(body.Checks), summaryField(body.Name))
 	}
-	return fmt.Sprintf("%d health checks on %s", len(body.Checks), summaryField(body.Name))
+	if body.Health.Source != nil && *body.Health.Source == "docker" {
+		text += " (Docker health)"
+	}
+	return text
 }
 
 // projectServiceHealthChecks keeps health_checks, name, ports, and health.
@@ -115,6 +122,9 @@ func serviceHealthCheckItems(v any) ([]any, error) {
 	return items, nil
 }
 
+// projectServiceHealth keeps status, last_checked_at, latency_ms, and source.
+// latency_ms is copied when it is a number or null, and omitted when absent.
+// source is docker, check, or null. Any other value is dropped.
 func projectServiceHealth(v any) (map[string]any, bool) {
 	row, ok := v.(map[string]any)
 	if !ok {
@@ -128,6 +138,18 @@ func projectServiceHealth(v any) (map[string]any, bool) {
 	}
 	if n, ok := row["latency_ms"].(json.Number); ok {
 		out["latency_ms"] = n
+	} else if _, present := row["latency_ms"]; present && row["latency_ms"] == nil {
+		out["latency_ms"] = nil
+	}
+	if _, present := row["source"]; present {
+		switch s := row["source"].(type) {
+		case nil:
+			out["source"] = nil
+		case string:
+			if s == "docker" || s == "check" {
+				out["source"] = s
+			}
+		}
 	}
 	return out, true
 }

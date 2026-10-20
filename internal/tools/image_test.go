@@ -121,6 +121,7 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 		userLeak        = "img-user-do-not-leak"
 		fileTargetLeak  = "img-file-target-do-not-leak"
 		fileContentLeak = "img-file-content-do-not-leak"
+		hcLeak          = "img-hc-argv-do-not-leak"
 	)
 	raw := []byte(`{"items":[
 		{"id":"88888888-8888-4888-8888-888888888888","name":"tra-backend","kind":"program",
@@ -136,7 +137,8 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 		   "env_sets":["base","web"],
 		   "volumes":[{"name":"webdata","target":"` + targetLeak + `","read_only":true},{"name":"services","target":"/var"}],
 		   "files":[{"file":"fcm.json","target":"` + fileTargetLeak + `","content":"` + fileContentLeak + `"}],
-		   "restart":"unless-stopped","memory_mb":256,"timeout_sec":120},
+		   "restart":"unless-stopped","memory_mb":256,"timeout_sec":120,
+		   "healthcheck":{"test":["redis-cli","` + hcLeak + `"],"interval_sec":30}},
 		 "my_actions":["deploy","logs","status"]}
 	]}`)
 	out, err := projectCatalog(raw)
@@ -144,7 +146,7 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(out)
-	for _, leak := range []string{envLeak, cmdLeak, entryLeak, targetLeak, fileTargetLeak, fileContentLeak, secretLeak, userLeak, "s3cret", "raw-token", "DATABASE_URL", "unless-stopped"} {
+	for _, leak := range []string{envLeak, cmdLeak, entryLeak, targetLeak, fileTargetLeak, fileContentLeak, secretLeak, userLeak, hcLeak, "s3cret", "raw-token", "DATABASE_URL", "unless-stopped", "redis-cli"} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("kept %s in %s", leak, text)
 		}
@@ -175,6 +177,9 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 	}
 	if img["kind"] != "image" || img["image_kind"] != "service" || img["image"] != "ghcr.io/example/web\uFFFDadmin:latest" {
 		t.Fatalf("image %#v", img)
+	}
+	if img["healthcheck"] != true {
+		t.Fatalf("healthcheck %#v", img["healthcheck"])
 	}
 	keys, _ := img["env_keys"].([]any)
 	if len(keys) != 2 || keys[0] != "DB_URL" || keys[1] != "NODE_ENV" {
@@ -262,6 +267,9 @@ func TestProjectCatalogFailsClosed(t *testing.T) {
 	keys, _ := body.Items[0]["env_keys"].([]any)
 	if len(keys) != 1 || keys[0] != "NODE_ENV" {
 		t.Fatalf("env_keys %#v", keys)
+	}
+	if body.Items[0]["healthcheck"] != false {
+		t.Fatalf("healthcheck %#v", body.Items[0]["healthcheck"])
 	}
 }
 

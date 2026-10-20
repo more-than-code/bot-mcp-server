@@ -1397,6 +1397,7 @@ type fakeAPI struct {
 	plan         string
 	confirmBody  any
 	serviceBody  any
+	healthBody   any
 }
 
 func (f *fakeAPI) setMode(mode string) {
@@ -1420,6 +1421,12 @@ func (f *fakeAPI) setConfirmBody(body any) {
 func (f *fakeAPI) setServiceBody(body any) {
 	f.mu.Lock()
 	f.serviceBody = body
+	f.mu.Unlock()
+}
+
+func (f *fakeAPI) setHealthBody(body any) {
+	f.mu.Lock()
+	f.healthBody = body
 	f.mu.Unlock()
 }
 
@@ -1565,6 +1572,7 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 	plan := f.plan
 	confirmBody := f.confirmBody
 	serviceBody := f.serviceBody
+	healthBody := f.healthBody
 	f.mu.Unlock()
 	switch mode {
 	case "forbidden":
@@ -1611,6 +1619,25 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			"next_cursor": nil,
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/hosts/"+hostID+"/services":
+		if mode == "docker-list" {
+			return http.StatusOK, "ok", "", map[string]any{
+				"items": []any{
+					map[string]any{
+						"id": serviceID, "name": "redis", "gone_at": nil,
+						"health": map[string]any{"status": "down", "source": "docker", "latency_ms": nil},
+					},
+					map[string]any{
+						"id": serviceID, "name": "api", "gone_at": nil,
+						"health": map[string]any{"status": "up", "source": "check", "latency_ms": 4},
+					},
+					map[string]any{
+						"id": serviceID, "name": "old", "gone_at": nil,
+						"health": map[string]any{"status": "unknown", "source": nil, "latency_ms": nil},
+					},
+				},
+				"next_cursor": nil,
+			}
+		}
 		return http.StatusOK, "ok", "", map[string]any{
 			"items": []any{map[string]any{
 				"id": serviceID, "name": "api", "health": map[string]any{"status": "up"},
@@ -1653,6 +1680,9 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			"items":      []any{map[string]any{"pid": 1, "process_name": "bot"}},
 		}
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/services/"+serviceID+"/health":
+		if healthBody != nil {
+			return http.StatusOK, "ok", "", healthBody
+		}
 		return http.StatusOK, "ok", "", map[string]any{
 			"items": []any{map[string]any{"t": "2026-10-13T00:00:00Z", "check_id": checkID, "result": "up", "http_status": 200, "latency_ms": 4}},
 		}
@@ -1675,6 +1705,29 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			return http.StatusOK, "ok", "", []any{map[string]any{
 				"name": imageEntry, "kind": "image",
 				"spec": map[string]any{"env": map[string]any{"NODE_ENV": envLeak}},
+			}}
+		}
+		if mode == "catalog-healthcheck" {
+			return http.StatusOK, "ok", "", map[string]any{"items": []any{
+				map[string]any{
+					"name": "tra-backend", "kind": "program",
+					"command_display": "pnpm start", "my_actions": []any{"run"},
+				},
+				map[string]any{
+					"name": "redis", "kind": "image", "command_display": "redis:7",
+					"spec": map[string]any{
+						"kind": "service", "image": "redis:7",
+						"healthcheck": map[string]any{
+							"test": []any{"redis-cli", "argv-sentinel-do-not-echo"}, "interval_sec": 30,
+						},
+					},
+					"my_actions": []any{"deploy"},
+				},
+				map[string]any{
+					"name": "nginx", "kind": "image", "command_display": "nginx:1",
+					"spec":       map[string]any{"kind": "service", "image": "nginx:1", "healthcheck": nil},
+					"my_actions": []any{"deploy"},
+				},
 			}}
 		}
 		return http.StatusOK, "ok", "", map[string]any{"items": catalogItems(images)}
@@ -1711,6 +1764,13 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 		}
 		return http.StatusAccepted, "ok", "", confirmationPayload("restart")
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/"+imageEntry+"/logs"):
+		if mode == "log-preview" {
+			return http.StatusOK, "ok", "", map[string]any{
+				"container": "lab-webadmin",
+				"lines":     []any{"abcd…", "••••", "ready abcd… ••••", "password=hunter2"},
+				"truncated": false,
+			}
+		}
 		return http.StatusOK, "ok", "", map[string]any{
 			"container": "lab-webadmin",
 			"lines":     []any{"listening", "token=" + logLeak},

@@ -226,6 +226,18 @@ func TestSummariesReplaceSeparators(t *testing.T) {
 	// summarizeHealth counts items and has no summaryField call site.
 	health := []byte(`{"items":[{"note":"a\nb\u2028c\u202Ed"}]}`)
 	mustSummary(t, "health", summarizeHealth(health), "1 health results", 1)
+	dockerHealth := []byte(`{"items":[{"protocol":"docker","result":"unhealthy"},{"protocol":"http","result":"success"},{"protocol":"docker","result":"success"}]}`)
+	mustSummary(t, "docker health", summarizeHealth(dockerHealth), "3 health results, 2 from Docker health", 1)
+
+	dockerServices := []byte(`{"items":[
+		{"name":"redis","health":{"status":"up","source":"docker","latency_ms":null}},
+		{"name":"api","health":{"status":"up","source":"check"}},
+		{"name":"old","health":{"status":"unknown","source":null}}
+	],"total":3}`)
+	wantDocker := "3 services, no more pages\nredis up (Docker health)\napi up\nold unknown"
+	if got := summarizeServices(dockerServices, true); got != wantDocker {
+		t.Fatalf("docker services\n got %q\nwant %q", got, wantDocker)
+	}
 }
 
 func TestPresentServicesKeepsGoneAt(t *testing.T) {

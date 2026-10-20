@@ -12,7 +12,7 @@ import (
 func registerCreateCatalogEntry(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, catalogWriteTool(
 		"create_catalog_entry",
-		"Create an image catalog entry. Nothing changes until confirm after the user agrees. Program entries are console-only. Secret env values go in env sets entered in the console, not in spec.env. Does not contact the host.",
+		"Create an image catalog entry. Nothing changes until confirm after the user agrees. Program entries are console-only. Secret env values go in env sets entered in the console, not in spec.env. spec.healthcheck is optional; when set, test is required and the API checks the remaining rules and fills defaults. Does not contact the host.",
 		catalogWriteSchema,
 	), func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
 		var in catalogWriteArgs

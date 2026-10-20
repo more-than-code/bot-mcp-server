@@ -397,3 +397,27 @@ A content-only change could not be rolled back: `image_rollback` redeployed the 
 4. **Refusal codes:** a helper refusal for a bad file slot or store (v1.5 rule 6) is `bad_spec`, and the `max_containers` cap is `policy_denied`; the agent maps both to outcome `forbidden_spec` (`task_result.error_code` = `forbidden_spec`). They are never reported as a bare `failed`.
 5. **Diagnostics:** the helper writes one line per refusal to the journal (`bot-agent-runner: refuse <verb> <reason>`; `StandardError=journal` in its unit, because stdout is the socket), and the agent logs a failed helper call as task kind, verb and reason or `transport`. Neither logs request data.
 6. **Overlapping projects (Joe 2026-10-17, from the wave 2b files review):** container and slot names are `<project>-<entry>`, which is ambiguous when one listed project is another plus `-` (`acme` and `acme-web`). The policy is then not valid for images: `images:false` in `hello.programs`, every image verb is refused `policy_denied`, and the helper logs `bot-agent-runner: policy: overlapping projects <a> <b>` once per connection. Program verbs are unaffected.
+
+## v1.6 Docker health status (2026-10-18, approved spec `docs/spec-docker-health.md` rev 1; additive, gated)
+
+Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; deploybot checks remain the fallback (api-v1 v1.11).
+
+1. **`container_list`** items gain `"health": "healthy"|"unhealthy"|"starting"|null`. The helper takes it from the Engine's structured `Health.Status` when present, otherwise from the `Status` text suffix `(healthy)`, `(unhealthy)` or `(health: starting)`; any other value, or no suffix, is `null`. No new verb, call or privilege.
+2. **Gate:** `hello.programs` gains `"docker_health": true` from an agent that implements this section. The server sends `config.docker_health: true` only to a host that advertised it (an older agent refuses unknown config keys); an older server never sends it. `config_update` carries it the same way. Without `config.docker_health: true` the agent emits no docker samples.
+3. **Docker health sample:** on each complete discovery pass, for each `kind:"container"` service in the set it sends (owned or not) whose item `health` is `healthy` or `unhealthy`, the agent emits `{"m":"health","t",...,"tags":{"service":<name>,"protocol":"docker"},"f":{"result":"success"|"unhealthy","http_status":null,"latency_ms":null}}`. `check_id` and `port` are absent for this form only. `starting` and `null` emit nothing. One sample per service per pass.
+4. **Validation:** the health sample rules become: protocol `http|tcp` requires `check_id` and `port` (1–65535) and a non-null `latency_ms`, result in `success|status_mismatch|timeout|connection_refused|error`; protocol `docker` forbids `check_id` and `port`, requires `http_status` and `latency_ms` null, result in `success|unhealthy`.
+5. Configured TCP/HTTP checks are unchanged and keep running on container services.
+6. **ImageSpec `healthcheck`** *(rev 2, approved 2026-10-20)*: the agent advertises `hello.programs.healthcheck: true`. A task's ImageSpec may carry `healthcheck` (api-v1 v1.11 item 7); the helper's `container_deploy` passes it to the Engine create body as `Healthcheck {Test: ["CMD", argv…], Interval, Timeout, Retries, StartPeriod}`.
+7. **Deploy wait** *(rev 2)*: for a service whose spec has `healthcheck`, after `container_deploy` the agent polls `container_list` every 2 s: `healthy` (and any configured TCP/HTTP checks passing) → `succeeded`; `starting` keeps waiting; `unhealthy`, or the wait limit (`max(timeout_sec, start_period_sec + interval_sec × (retries + 1))`) → `container_rollback` → `rolled_back` / `rollback_failed`. `image_rollback` waits on the restored container the same way. Without `healthcheck` the v1.5 rule is unchanged.
+
+## v1.7 secret previews in task output (2026-10-20, approved spec `docs/spec-env-editing.md` rev 1; no wire change)
+
+1. In image task output (log tails, error text) the agent replaces an env secret value from the task (raw, base64 and JSON-escaped forms, values of at least 6 bytes as before) with `preview(v)`: the first 4 runes followed by `…` when `v` has at least 16 runes, otherwise `••••`.
+2. Secret-file pieces keep `[REDACTED]`. The keyword rule is unchanged.
+3. The task frame is unchanged. An agent before v1.7 keeps writing `[REDACTED]`; the API accepts both.
+
+## v1.6.1 health-aware unchanged, first-deploy failure (2026-10-20, `docs/spec-docker-health.md` rev 3 §10, approved 2026-10-21; no wire change)
+
+1. **Unchanged** (amends rule 11 for service deploys): when the task's ImageSpec has `healthcheck`, `unchanged` also requires the current container's `container_list` health to be `healthy`; otherwise the agent deploys and waits per v1.6 item 7. Without `healthcheck`, rule 11 is unchanged.
+2. **Nothing good to roll back to:** a service deploy whose wait fails, when the container that was current before the deploy was not `running` (`missing`, `exited`, `created`, `dead`), does not call `container_rollback`. The agent calls `container_stop` on the new container (it is kept) and reports outcome `failed`, with that container's status and the last ≤ 50 redacted log lines. When it was `running`, v1.6 item 7 applies (`rolled_back` / `rollback_failed`). A parked older container stays on `-prev` and is not started. *(Amended 2026-10-21 from the w28 spec review.)*
+3. `image_rollback` and jobs are unchanged.

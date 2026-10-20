@@ -24,7 +24,7 @@ const serviceHealthSchema = `{
 func registerServiceHealthHistory(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "service_health_history",
-		Description: "Read stored health-check results for a service. Optional from and to are RFC3339 UTC timestamps. Does not contact the host.",
+		Description: "Read stored health-check results for a service. A row from Docker health has protocol docker (result success or unhealthy; check_id, port, http_status, and latency_ms are null). Other rows are Deploybot checks. Optional from and to are RFC3339 UTC timestamps. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(serviceHealthSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
