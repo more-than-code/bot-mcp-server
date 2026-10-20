@@ -41,7 +41,7 @@ Docker health (api-v1 v1.11) is one health source. `list_services` and `get_heal
 
 `list_hosts` includes hosts shared with the project (`relation` and `share_level` pass through; a shared host is summarized as `srv-01 online (shared: metrics)`). `list_services` takes `host_id` or `project_id`; with `project_id` the query (`q`, `sort`, `dir`, `limit`, `cursor`, `view`) is passed through and the result is paged and limited to what that project may see. `view` is `all` (default when omitted), `deploybot`, or `deploybot_and_discovered`. A service's `gone_at`, when set, means the host no longer reports it. `list_processes` shows the whole host.
 
-## deploybot
+## Deploybot
 
 ```bash
 go run ./cmd/deploybot login --api https://<api>
