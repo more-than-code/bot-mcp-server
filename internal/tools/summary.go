@@ -38,6 +38,20 @@ const maxPlanRunes = 1024
 // A 10-HTTP set has no tcp row, so an API plan is at most 41 runes shorter.
 const maxHealthPlanRunes = 10886
 
+// maxCatalogPlanRunes is the longest catalog-write plan these tools show.
+// A longer plan is an error, not a shortened sentence. Run, stop, restart,
+// deploy, and rollback keep maxPlanRunes.
+//
+// Sized to catalogUpdatePlan with every field changed and each limit maxed.
+// strconv.Quote of n non-printable bytes is 2+4*n runes (\xNN).
+//
+//	env, 64 keys, both sides a quoted 4096-byte value     2101954
+//	command and entrypoint, 32 args, both sides           2097559
+//	files, volumes, secret_env, image, ports, and the rest  78955
+//	head, field separators, and the approvals tail            145
+//	total                                                4278613
+const maxCatalogPlanRunes = 4278613
+
 // summaryField replaces controls, format characters, and line or paragraph
 // separators with U+FFFD, then caps the result at summaryFieldRunes.
 // That keeps bidi overrides and Unicode line breaks out of a summary line.

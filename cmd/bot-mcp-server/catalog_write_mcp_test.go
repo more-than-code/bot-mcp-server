@@ -11,6 +11,13 @@ import (
 
 const fileContentLeak = "img-file-content-do-not-leak"
 
+func catalogPlanOr(action, override string) string {
+	if override != "" {
+		return override
+	}
+	return catalogWritePlan(action)
+}
+
 func catalogWritePlan(action string) string {
 	switch action {
 	case "update":
@@ -157,6 +164,21 @@ func TestCatalogWriteTools(t *testing.T) {
 		t.Fatalf("bad confirm error=%v text %q", bad.IsError, textOf(t, bad))
 	}
 	assertNoCatalogLeaks(t, bad)
+}
+
+func TestCatalogWritePlanKept(t *testing.T) {
+	fake := &fakeAPI{token: userToken}
+	mcpSrv, _ := newTestServer(t, fake)
+	cs, _ := connectMCP(t, mcpSrv, userToken)
+	plan := "will update image entry web: secret_env: OTHER←svc.OTHER, TOKEN←svc.TOKEN → none; env MODE=plain-mode-value; " + strings.Repeat("p", 1100)
+	fake.setPlan(plan)
+	res := mustCall(t, cs, "create_catalog_entry", map[string]any{
+		"project_id": projectID, "name": imageEntry, "spec": catalogSpec(), "idempotency_key": "plan-1",
+	})
+	assertPlan(t, res, plan)
+	if strings.Contains(textOf(t, res), "secret_env=[REDACTED]") || strings.Contains(textOf(t, res), "…") {
+		t.Fatalf("plan was rewritten %q", textOf(t, res))
+	}
 }
 
 func assertPlan(t *testing.T, res *mcp.CallToolResult, plan string) {

@@ -255,6 +255,21 @@ var errPlanTooLong = errors.New("plan too long")
 // errStatusShape is fixed. It must not include the status body or the state.
 var errStatusShape = errors.New("status response was not usable")
 
+// confirmationCatalog accepts the 202 plan for a catalog image write.
+// The plan is the API sentence with control characters replaced.
+// Keyword redaction is not applied: secret_env names a source, not a value.
+// A plan longer than maxCatalogPlanRunes is an error and returns no confirmation id.
+func confirmationCatalog(status int, payload json.RawMessage) *mcp.CallToolResult {
+	if status != http.StatusAccepted {
+		return toolError("error", "expected a confirmation")
+	}
+	projected, err := projectCatalogConfirmation(payload)
+	if errors.Is(err, errPlanTooLong) {
+		return toolError("error", "plan too long to show")
+	}
+	return finishConfirmation(projected, err)
+}
+
 // confirmationHealth is confirmationOnly with the health-check plan cap.
 // A plan longer than that cap is an error. It is not shortened.
 func confirmationHealth(status int, payload json.RawMessage) *mcp.CallToolResult {
@@ -304,11 +319,51 @@ func finishConfirmation(projected json.RawMessage, err error) *mcp.CallToolResul
 	}
 	if body.Plan != "" {
 		b.WriteByte('\n')
-		// projectConfirmation already redacted and capped the plan.
+		// The projector already cleaned and capped the plan.
 		b.WriteString(body.Plan)
 	}
 	b.WriteString(historyLines(payload))
 	return present(payload, b.String())
+}
+
+// projectCatalogConfirmation is the catalog-write 202 body.
+// plan is not redacted and not shortened. A plan over maxCatalogPlanRunes
+// is errPlanTooLong, and the confirmation id is not returned.
+// confirmation_id, expires_at, and history stay on the usual allowlist.
+func projectCatalogConfirmation(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, errConfirmationShape
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var body map[string]any
+	if err := dec.Decode(&body); err != nil {
+		return nil, errConfirmationShape
+	}
+	plan, _ := body["plan"].(string)
+	plan = replaceControls(plan)
+	if len([]rune(plan)) > maxCatalogPlanRunes {
+		return nil, errPlanTooLong
+	}
+	out := map[string]any{}
+	if s, ok := body["confirmation_id"].(string); ok {
+		out["confirmation_id"] = publicString(s)
+	}
+	if s, ok := body["expires_at"].(string); ok {
+		out["expires_at"] = publicString(s)
+	}
+	if plan != "" {
+		out["plan"] = plan
+	}
+	if hist, ok := body["history"].([]any); ok {
+		out["history"] = projectHistoryRows(hist)
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, errConfirmationShape
+	}
+	return encoded, nil
 }
 
 // projectConfirmation returns only confirmation_id, plan, expires_at, history,

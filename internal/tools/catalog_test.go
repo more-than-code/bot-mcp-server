@@ -55,6 +55,56 @@ func TestPendingConfirmationIsNotProgramStatus(t *testing.T) {
 	}
 }
 
+func TestConfirmationCatalogKeepsTheAPIPlan(t *testing.T) {
+	const id = "Abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE"
+	plan := "secret_env OTHER←svc.OTHER, TOKEN←svc.TOKEN; env MODE=plain-mode-value\u202e"
+	plan += strings.Repeat("p", maxPlanRunes)
+	body, err := json.Marshal(map[string]any{
+		"confirmation_id": id,
+		"plan":            plan,
+		"expires_at":      "2026-10-15T00:05:00Z",
+		"note":            "drop-me",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := confirmationCatalog(http.StatusAccepted, body)
+	if res.IsError {
+		t.Fatal(toolText(t, res))
+	}
+	want := strings.ReplaceAll(plan, "\u202e", "\uFFFD")
+	if got := structuredString(t, res, "plan"); got != want {
+		t.Fatalf("plan len %d want %d", len([]rune(got)), len([]rune(want)))
+	}
+	if structuredString(t, res, "confirmation_id") != id {
+		t.Fatal("missing confirmation id")
+	}
+	raw, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "drop-me") || strings.Contains(string(raw), "secret_env=[REDACTED]") {
+		t.Fatalf("structured %s", raw)
+	}
+
+	huge := strings.Repeat("q", maxCatalogPlanRunes+1)
+	over, err := json.Marshal(map[string]any{
+		"confirmation_id": id,
+		"plan":            huge,
+		"expires_at":      "2026-10-15T00:05:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := confirmationCatalog(http.StatusAccepted, over)
+	if !bad.IsError || toolText(t, bad) != "error: plan too long to show" {
+		t.Fatalf("over error=%v text %q", bad.IsError, toolText(t, bad))
+	}
+	if strings.Contains(toolText(t, bad), id) || bad.StructuredContent != nil {
+		t.Fatal("over-long plan returned a confirmation")
+	}
+}
+
 func TestConfirmationOnlyRejectsHTTP200(t *testing.T) {
 	status := []byte(`{"unit":"u","active_state":"active","sub_state":"running","main_pid":7}`)
 	res := confirmationOnly(http.StatusOK, status)

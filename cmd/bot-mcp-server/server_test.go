@@ -1767,17 +1767,17 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 		if mode == "acted" {
 			return http.StatusCreated, "ok", "", catalogWriteEntry()
 		}
-		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogWritePlan("create"))
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogPlanOr("create", plan))
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/projects/"+projectID+"/catalog/"+imageEntry:
 		if mode == "acted" {
 			return http.StatusOK, "ok", "", catalogWriteEntry()
 		}
-		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogWritePlan("update"))
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogPlanOr("update", plan))
 	case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/"+projectID+"/catalog/"+imageEntry:
 		if mode == "acted" {
 			return http.StatusOK, "ok", "", nil
 		}
-		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogWritePlan("delete"))
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogPlanOr("delete", plan))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/confirmations/"+confirmationID:
 		f.noteConfirm()
 		switch mode {

@@ -28,6 +28,6 @@ func registerCreateCatalogEntry(server *mcp.Server, api *apiclient.Client) {
 		if fail != nil {
 			return fail
 		}
-		return confirmationOnly(status, payload)
+		return confirmationCatalog(status, payload)
 	})
 }
