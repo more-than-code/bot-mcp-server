@@ -818,11 +818,16 @@ func TestRoutesWriteDeadline(t *testing.T) {
 		t.Fatal("health extended the write deadline")
 	}
 	anon := &deadlineRec{ResponseWriter: httptest.NewRecorder()}
-	handler.ServeHTTP(anon, httptest.NewRequest(http.MethodPost, "/mcp", nil))
+	anonReq := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	// A path-only NewRequest has an empty Host, which /mcp now refuses before
+	// the write-budget wrapper. Set a loopback Host so these still reach it.
+	anonReq.Host = "127.0.0.1"
+	handler.ServeHTTP(anon, anonReq)
 	if !anon.set.IsZero() {
 		t.Fatal("unauthenticated mcp extended the write deadline")
 	}
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1"
 	req.Header.Set("Authorization", "Bearer "+userToken)
 	authed := &deadlineRec{ResponseWriter: httptest.NewRecorder()}
 	handler.ServeHTTP(authed, req)

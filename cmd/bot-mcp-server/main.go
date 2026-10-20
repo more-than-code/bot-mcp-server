@@ -58,9 +58,9 @@ func main() {
 }
 
 // newHandler serves health, protected-resource metadata, and the MCP endpoint.
-// /mcp exchanges the caller token before any MCP handling. The MCP handler is
-// stateless: the SDK accepts protocol 2026-07-28 only in that mode, and this
-// server keeps no session of its own.
+// /mcp checks Host, then exchanges the caller token, before any MCP handling.
+// The MCP handler is stateless: the SDK accepts protocol 2026-07-28 only in
+// that mode, and this server keeps no session of its own.
 func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Handler, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -84,8 +84,15 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Ha
 		JSONResponse:                 true,
 		Logger:                       logger,
 		PropagateRequestCancellation: true,
+		// hostCheck allows the public Host on this loopback listener.
+		// The SDK check would reject it, so it is off.
+		DisableLocalhostProtection: true,
 	})
 
+	checked, err := hostCheck(cfg.PublicOrigin, logger, exchanger.RequireDelegated(cfg.PublicOrigin, withWriteBudget(mcpHandler)))
+	if err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -93,7 +100,7 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Ha
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("GET /.well-known/oauth-protected-resource", auth.ProtectedResource(cfg.PublicOrigin, cfg.APIURL))
-	mux.Handle("/mcp", exchanger.RequireDelegated(cfg.PublicOrigin, withWriteBudget(mcpHandler)))
+	mux.Handle("/mcp", checked)
 	return mux, nil
 }
 

@@ -58,6 +58,9 @@ func TestMissingAndInvalidToken(t *testing.T) {
 			// A newline cannot be sent with http.Client; call the handler directly.
 			if strings.Contains(tc.header, "\n") {
 				req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+				// A path-only NewRequest has an empty Host, which /mcp now refuses
+				// before auth. Set a loopback Host so this still reaches the token check.
+				req.Host = "127.0.0.1"
 				req.Header["Authorization"] = []string{tc.header}
 				rec := httptest.NewRecorder()
 				mcpSrv.Config.Handler.ServeHTTP(rec, req)
@@ -1886,6 +1889,11 @@ func (s *safeBuf) String() string {
 
 func newTestServer(t *testing.T, fake *fakeAPI) (*httptest.Server, *safeBuf) {
 	t.Helper()
+	return newTestServerWithOrigin(t, fake, "https://mcp.example/")
+}
+
+func newTestServerWithOrigin(t *testing.T, fake *fakeAPI, publicOrigin string) (*httptest.Server, *safeBuf) {
+	t.Helper()
 	apiSrv := httptest.NewServer(fake)
 	t.Cleanup(apiSrv.Close)
 	fake.base = apiSrv.URL
@@ -1900,7 +1908,7 @@ func newTestServer(t *testing.T, fake *fakeAPI) (*httptest.Server, *safeBuf) {
 	handler, err := newHandler(config{
 		Listen:       "127.0.0.1:0",
 		APIURL:       apiSrv.URL,
-		PublicOrigin: "https://mcp.example/",
+		PublicOrigin: publicOrigin,
 		ClientSecret: clientSecret,
 	}, api, logger)
 	if err != nil {

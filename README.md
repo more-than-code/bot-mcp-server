@@ -21,6 +21,8 @@ go run ./cmd/bot-mcp-server
 
 `GET /health` is unauthenticated. `GET /.well-known/oauth-protected-resource` gives the resource `<BOT_MCP_PUBLIC_ORIGIN>/mcp` (the URL clients connect to; the API's `BOT_API_MCP_RESOURCE` must equal it), names the API origin as the authorization server, and lists scope `deploybot`. `POST /mcp` requires `Authorization: Bearer <token>`. The server exchanges that token and calls the API with the delegated token only.
 
+`POST /mcp` checks `Host` before that exchange. The header must be the host of `BOT_MCP_PUBLIC_ORIGIN`, compared case-insensitively: the bare name, or with the scheme's default port (`443` for https, `80` for http). An origin that names a non-default port matches that port only; an explicit default port counts as none. `localhost`, `127.0.0.1`, and `[::1]` are also allowed, with or without a port. Any other value, including an empty `Host`, is HTTP 403 with the body `forbidden: invalid Host header`. The response and the refusal log do not include the header. A reverse proxy can forward the public `Host` unchanged; a Caddy `header_up Host` rewrite is not needed.
+
 `BOT_MCP_API_URL` is an origin (`https://host[:port]`, optional trailing slash). A path, query, or fragment is refused at startup. `BOT_MCP_API_URL` and `BOT_MCP_PUBLIC_ORIGIN` must be `https`. Cleartext `http` is allowed only for `localhost`, `127.0.0.1`, and `::1`, or when `BOT_MCP_ALLOW_INSECURE_HTTP=1` (development/internal testing only). The API client does not follow redirects.
 
 Phase 1 tools are read-only: `list_projects`, `list_hosts`, `list_services`, `query_metrics`, `list_processes`, `service_health_history`, `host_snapshot`, `probe_service`. `host_snapshot` and `probe_service` contact the host when they are called.
