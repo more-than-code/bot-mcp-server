@@ -1,6 +1,7 @@
 // Package tools registers the MCP tools. Each tool calls bot-api-server with
 // the delegated token for this request. The caller's token is never sent.
-// Catalog run, stop, restart, deploy, rollback, and set_health_checks do not act until confirm.
+// Catalog run, stop, restart, deploy, rollback, set_health_checks, and catalog
+// image create, replace, and delete do not act until confirm.
 package tools
 
 import (
@@ -47,6 +48,9 @@ func Register(server *mcp.Server, api *apiclient.Client) {
 	registerDeployEntry(server, api)
 	registerRollbackEntry(server, api)
 	registerSetHealthChecks(server, api)
+	registerCreateCatalogEntry(server, api)
+	registerUpdateCatalogEntry(server, api)
+	registerDeleteCatalogEntry(server, api)
 	registerConfirm(server, api)
 	registerEntryLogs(server, api)
 	registerEntryStatus(server, api)
@@ -76,9 +80,11 @@ func readOnlyAnnotations(openWorld bool) *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &open}
 }
 
-// mutatingAnnotations marks a tool that changes a host. openWorld is false
-// for run, stop, restart, deploy, rollback, and set_health_checks: those
-// calls do not act. confirm sets it true because that call contacts the host.
+// mutatingAnnotations marks a tool that changes a host or a catalog entry.
+// openWorld is false for run, stop, restart, deploy, rollback,
+// set_health_checks, and catalog create, replace, and delete: those calls
+// do not act. confirm sets it true because a program or image confirm can
+// contact the host. A catalog-write confirm does not.
 func mutatingAnnotations(openWorld bool) *mcp.ToolAnnotations {
 	open := openWorld
 	destructive := true
@@ -201,7 +207,15 @@ func actedOrPending(status int, payload json.RawMessage) *mcp.CallToolResult {
 	switch status {
 	case http.StatusAccepted:
 		return pendingConfirmation(payload)
+	case http.StatusCreated:
+		return catalogWriteResult(payload, "created")
 	case http.StatusOK:
+		if isNullJSON(payload) {
+			return catalogWriteResult(payload, "deleted")
+		}
+		if catalogEntryPayload(payload) {
+			return catalogWriteResult(payload, "updated")
+		}
 		if projected, ok, err := projectHealthChecks(payload); ok {
 			if err != nil {
 				return toolError("error", errHealthChecksShape.Error())

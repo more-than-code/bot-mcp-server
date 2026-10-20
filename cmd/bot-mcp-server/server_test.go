@@ -208,6 +208,26 @@ func TestTools(t *testing.T) {
 					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
 				}
 			}
+		case tool.Name == "create_catalog_entry" || tool.Name == "update_catalog_entry" || tool.Name == "delete_catalog_entry":
+			if readOnly || open {
+				t.Errorf("%s readOnly=%v openWorld=%v", tool.Name, readOnly, open)
+			}
+			for _, phrase := range []string{
+				"Nothing changes until confirm",
+				"user agrees",
+				"console",
+				"Does not contact",
+			} {
+				if !strings.Contains(tool.Description, phrase) {
+					t.Errorf("%s description %q missing %q", tool.Name, tool.Description, phrase)
+				}
+			}
+			if tool.Name != "delete_catalog_entry" && !strings.Contains(tool.Description, "env sets") {
+				t.Errorf("%s description %q missing env sets", tool.Name, tool.Description)
+			}
+			if tool.Name == "delete_catalog_entry" && !strings.Contains(tool.Description, "not stopped") {
+				t.Errorf("%s description %q missing not stopped", tool.Name, tool.Description)
+			}
 		case live[tool.Name]:
 			if tool.Name == "confirm" {
 				if readOnly {
@@ -279,13 +299,14 @@ func TestTools(t *testing.T) {
 		"list_processes", "service_health_history", "get_health_checks", "host_snapshot", "probe_service",
 		"list_catalog", "run_entry", "stop_entry", "restart_entry",
 		"deploy_entry", "rollback_entry", "set_health_checks",
+		"create_catalog_entry", "update_catalog_entry", "delete_catalog_entry",
 		"confirm", "entry_logs", "entry_status",
 	} {
 		if !seen[name] {
 			t.Errorf("missing tool %s", name)
 		}
 	}
-	if len(seen) != 19 {
+	if len(seen) != 22 {
 		t.Fatalf("tool count %d", len(seen))
 	}
 
@@ -1742,8 +1763,33 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 			"expires_at":      "2026-10-15T00:05:00Z",
 			"note":            "hunter2plain",
 		}
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/projects/"+projectID+"/catalog":
+		if mode == "acted" {
+			return http.StatusCreated, "ok", "", catalogWriteEntry()
+		}
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogWritePlan("create"))
+	case r.Method == http.MethodPut && r.URL.Path == "/v1/projects/"+projectID+"/catalog/"+imageEntry:
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", catalogWriteEntry()
+		}
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogWritePlan("update"))
+	case r.Method == http.MethodDelete && r.URL.Path == "/v1/projects/"+projectID+"/catalog/"+imageEntry:
+		if mode == "acted" {
+			return http.StatusOK, "ok", "", nil
+		}
+		return http.StatusAccepted, "ok", "", confirmationPayloadText(catalogWritePlan("delete"))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/confirmations/"+confirmationID:
 		f.noteConfirm()
+		switch mode {
+		case "catalog-created":
+			return http.StatusCreated, "ok", "", catalogWriteEntry()
+		case "catalog-updated":
+			return http.StatusOK, "ok", "", catalogWriteEntry()
+		case "catalog-deleted":
+			return http.StatusOK, "ok", "", nil
+		case "catalog-bad":
+			return http.StatusCreated, "ok", "", map[string]any{"ok": true, "secret": envLeak}
+		}
 		if mode == "health-checks" {
 			if confirmBody != nil {
 				return http.StatusOK, "ok", "", confirmBody
