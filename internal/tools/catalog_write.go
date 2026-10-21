@@ -22,7 +22,7 @@ var errCatalogWriteShape = errors.New("catalog entry response was not usable")
 var imageSpecKeys = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
 	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {},
-	"healthcheck": {}, "restart": {}, "user": {}, "healthy_after_sec": {},
+	"healthcheck": {}, "logging": {}, "restart": {}, "user": {}, "healthy_after_sec": {},
 	"memory_mb": {}, "timeout_sec": {},
 }
 
@@ -41,6 +41,13 @@ const (
 	healthTriesMax = 10
 	healthStartMin = 0
 	healthStartMax = 600
+
+	// Log bounds match api-v1 v1.14. A null or missing logging field means
+	// Deploybot's default of 10 MB × 3 files.
+	logSizeMin  = 1
+	logSizeMax  = 100
+	logFilesMin = 1
+	logFilesMax = 10
 )
 
 const catalogWriteSchema = `{
@@ -80,6 +87,15 @@ const catalogWriteSchema = `{
             "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 60},
             "retries": {"type": "integer", "minimum": 1, "maximum": 10},
             "start_period_sec": {"type": "integer", "minimum": 0, "maximum": 600}
+          }
+        },
+        "logging": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["max_size_mb", "max_files"],
+          "properties": {
+            "max_size_mb": {"type": "integer", "minimum": 1, "maximum": 100},
+            "max_files": {"type": "integer", "minimum": 1, "maximum": 10}
           }
         },
         "restart": {"type": "string"},
@@ -176,7 +192,7 @@ func requireCatalogName(value string) error {
 }
 
 // validateImageSpec accepts an ImageSpec object and rejects unknown keys.
-// It checks the healthcheck shape. It does not apply image rules 1–13, fill
+// It checks the healthcheck and logging shapes. It does not apply image rules 1–13, fill
 // healthcheck defaults, or compare timeout_sec with interval_sec. The API does,
 // and names the field. A rejected healthcheck does not include the argv.
 func validateImageSpec(raw json.RawMessage) error {
@@ -206,6 +222,11 @@ func validateImageSpec(raw json.RawMessage) error {
 	}
 	if hc, ok := fields["healthcheck"]; ok {
 		if err := validateHealthcheck(hc); err != nil {
+			return err
+		}
+	}
+	if logging, ok := fields["logging"]; ok {
+		if err := validateLogging(logging); err != nil {
 			return err
 		}
 	}
@@ -262,6 +283,46 @@ func validateHealthcheck(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// validateLogging checks the local shape. Null means the field is omitted
+// and Deploybot keeps the default of 10 MB × 3 files. Both keys are required
+// when the object is present. The spec bytes are still forwarded unchanged
+// when this returns nil.
+func validateLogging(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var fields map[string]json.RawMessage
+	if err := dec.Decode(&fields); err != nil || fields == nil {
+		return errors.New("logging must be an object")
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("logging must be an object")
+	}
+	allowed := map[string]struct{}{
+		"max_size_mb": {}, "max_files": {},
+	}
+	for key := range fields {
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("unknown logging field %s", key)
+		}
+	}
+	size, ok := fields["max_size_mb"]
+	if !ok {
+		return errors.New("logging.max_size_mb is required")
+	}
+	if err := validateBoundedInt(size, "logging.max_size_mb", logSizeMin, logSizeMax); err != nil {
+		return err
+	}
+	files, ok := fields["max_files"]
+	if !ok {
+		return errors.New("logging.max_files is required")
+	}
+	return validateBoundedInt(files, "logging.max_files", logFilesMin, logFilesMax)
 }
 
 func validateHealthTest(raw json.RawMessage) error {

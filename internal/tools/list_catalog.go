@@ -27,7 +27,7 @@ const listCatalogSchema = `{
 func registerListCatalog(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_catalog",
-		Description: "List catalog entries in a project. Returns name, kind, command_display, and the actions the caller may take. An image entry also returns the image reference, service or job, ports, volume short names, managed file names, env key names, env set names, and healthcheck true or false (not the healthcheck command), and does not return env values, file contents, or file targets. Does not return the program spec or its environment. Does not contact the host.",
+		Description: "List catalog entries in a project. Returns name, kind, command_display, and the actions the caller may take. An image entry also returns the image reference, service or job, ports, volume short names, managed file names, env key names, env set names, healthcheck true or false (not the healthcheck command), and logging as max_size_mb and max_files or null. It does not return env values, file contents, or file targets. Does not return the program spec or its environment. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(listCatalogSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
@@ -56,8 +56,9 @@ func registerListCatalog(server *mcp.Server, api *apiclient.Client) {
 // projectCatalog returns only an items array of allowlisted fields.
 // A program keeps name, kind, command_display, and my_actions.
 // An image also keeps the image reference, service or job, ports, volume
-// short names, file names, env key names, env set names, and healthcheck
-// true or false. The healthcheck command is not copied. Values are not copied.
+// short names, file names, env key names, env set names, healthcheck
+// true or false, and logging as max_size_mb and max_files or null.
+// The healthcheck command is not copied. Values are not copied.
 // Anything that is not that shape is an error. The raw body is never returned.
 func projectCatalog(raw json.RawMessage) (json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(raw)
@@ -129,8 +130,41 @@ func projectImageEntry(row map[string]any) map[string]any {
 		"env_keys":        envKeyNames(spec),
 		"env_sets":        stringList(spec["env_sets"]),
 		"healthcheck":     imageHasHealthcheck(spec),
+		"logging":         projectLogging(spec),
 		"my_actions":      stringList(row["my_actions"]),
 	}
+}
+
+// projectLogging keeps max_size_mb and max_files when spec.logging is an
+// object of those integers. Otherwise it is null. Other fields are not copied.
+func projectLogging(spec map[string]any) any {
+	if spec == nil {
+		return nil
+	}
+	obj, ok := spec["logging"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	size, sizeOK := integerField(obj["max_size_mb"])
+	files, filesOK := integerField(obj["max_files"])
+	if !sizeOK || !filesOK {
+		return nil
+	}
+	return map[string]any{
+		"max_size_mb": size,
+		"max_files":   files,
+	}
+}
+
+func integerField(v any) (json.Number, bool) {
+	n, ok := v.(json.Number)
+	if !ok {
+		return "", false
+	}
+	if _, err := n.Int64(); err != nil {
+		return "", false
+	}
+	return n, true
 }
 
 // imageHasHealthcheck is true only when spec.healthcheck is an object.

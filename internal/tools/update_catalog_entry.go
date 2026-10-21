@@ -12,7 +12,7 @@ import (
 func registerUpdateCatalogEntry(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, catalogWriteTool(
 		"update_catalog_entry",
-		"Replace an image catalog entry. An owner or admin may replace it. Nothing changes until confirm after the user agrees. Read the entry with list_catalog first. Program entries are console-only. Secret env values go in env sets entered in the console, not in spec.env. spec.healthcheck is optional; when set, test is required and the API checks the remaining rules and fills defaults. Does not contact the host.",
+		"Replace an image catalog entry. An owner or admin may replace it. Nothing changes until confirm after the user agrees. Read the entry with list_catalog first. Program entries are console-only. Secret env values go in env sets entered in the console, not in spec.env. spec.healthcheck is optional; when set, test is required and the API checks the remaining rules and fills defaults. spec.logging is optional; Deploybot defaults to 10 MB × 3 files, and an override sets both max_size_mb (1–100) and max_files (1–10). Does not contact the host.",
 		catalogWriteSchema,
 	), func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
 		var in catalogWriteArgs

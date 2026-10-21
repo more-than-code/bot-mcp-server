@@ -1730,6 +1730,34 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 				},
 			}}
 		}
+		if mode == "catalog-logging" {
+			return http.StatusOK, "ok", "", map[string]any{"items": []any{
+				map[string]any{
+					"name": "tra-backend", "kind": "program",
+					"command_display": "pnpm start", "my_actions": []any{"run"},
+					"spec": map[string]any{
+						"logging": map[string]any{
+							"max_size_mb": 9, "max_files": 9, "note": "program-log-do-not-keep",
+						},
+					},
+				},
+				map[string]any{
+					"name": "redis", "kind": "image", "command_display": "redis:7",
+					"spec": map[string]any{
+						"kind": "service", "image": "redis:7",
+						"logging": map[string]any{
+							"max_size_mb": 5, "max_files": 2, "driver": "image-log-extra-do-not-keep",
+						},
+					},
+					"my_actions": []any{"deploy"},
+				},
+				map[string]any{
+					"name": "nginx", "kind": "image", "command_display": "nginx:1",
+					"spec":       map[string]any{"kind": "service", "image": "nginx:1"},
+					"my_actions": []any{"deploy"},
+				},
+			}}
+		}
 		return http.StatusOK, "ok", "", map[string]any{"items": catalogItems(images)}
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects/"+projectID+"/catalog/") && strings.HasSuffix(r.URL.Path, "/deploys"):
 		if mode == "history-down" {
