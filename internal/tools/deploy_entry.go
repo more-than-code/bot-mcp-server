@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -97,7 +98,8 @@ func fetchDeploys(ctx context.Context, api *apiclient.Client, projectID, entry, 
 	return payload, true
 }
 
-// attachHistory keeps digest, outcome, and time for the newest 3 rows.
+// attachHistory keeps digest, outcome, and time for the newest 3 non-automatic
+// rows (outcomes starting with auto_ are skipped).
 // The digest stays full so rollback_entry can use it. Other fields, including
 // anything that could carry an env value, are dropped.
 func attachHistory(raw, deploys json.RawMessage) json.RawMessage {
@@ -131,6 +133,9 @@ func projectHistory(raw json.RawMessage) []any {
 	for _, item := range body.Items {
 		if len(out) == 3 {
 			break
+		}
+		if strings.HasPrefix(item.Outcome, "auto_") {
+			continue
 		}
 		if item.Digest == "" && item.Outcome == "" {
 			continue

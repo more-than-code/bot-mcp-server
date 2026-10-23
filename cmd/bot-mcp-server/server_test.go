@@ -1730,6 +1730,31 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 				},
 			}}
 		}
+		if mode == "catalog-health-policy" {
+			return http.StatusOK, "ok", "", map[string]any{"items": []any{
+				map[string]any{
+					"name": "web", "kind": "image", "command_display": "nginx:1",
+					"spec":       map[string]any{"kind": "service", "image": "nginx:1"},
+					"my_actions": []any{"deploy"},
+				},
+				map[string]any{
+					"name": "api", "kind": "image", "command_display": "api:1",
+					"spec": map[string]any{
+						"kind": "service", "image": "api:1",
+						"healthcheck": map[string]any{"test": []any{"true"}},
+						"health_policy": map[string]any{
+							"on_unhealthy": "restart", "max_actions_per_hour": 5, "note": "policy-extra-do-not-keep",
+						},
+					},
+					"my_actions": []any{"deploy"},
+				},
+				map[string]any{
+					"name": "migrate", "kind": "image", "command_display": "migrate:1",
+					"spec":       map[string]any{"kind": "job", "image": "migrate:1"},
+					"my_actions": []any{"deploy"},
+				},
+			}}
+		}
 		if mode == "catalog-logging" {
 			return http.StatusOK, "ok", "", map[string]any{"items": []any{
 				map[string]any{

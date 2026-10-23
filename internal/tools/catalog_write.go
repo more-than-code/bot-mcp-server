@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -22,7 +23,7 @@ var errCatalogWriteShape = errors.New("catalog entry response was not usable")
 var imageSpecKeys = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
 	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {},
-	"healthcheck": {}, "logging": {}, "restart": {}, "user": {}, "healthy_after_sec": {},
+	"healthcheck": {}, "logging": {}, "health_policy": {}, "restart": {}, "user": {}, "healthy_after_sec": {},
 	"memory_mb": {}, "timeout_sec": {},
 }
 
@@ -48,6 +49,12 @@ const (
 	logSizeMax  = 100
 	logFilesMin = 1
 	logFilesMax = 10
+
+	// Health policy bounds match api-v1 v1.15 item 1.
+	policyAfterMin   = 15
+	policyAfterMax   = 600
+	policyActionsMin = 1
+	policyActionsMax = 10
 )
 
 const catalogWriteSchema = `{
@@ -96,6 +103,16 @@ const catalogWriteSchema = `{
           "properties": {
             "max_size_mb": {"type": "integer", "minimum": 1, "maximum": 100},
             "max_files": {"type": "integer", "minimum": 1, "maximum": 10}
+          }
+        },
+        "health_policy": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "on_deploy_failure": {"type": "string", "enum": ["rollback", "stop", "keep"]},
+            "on_unhealthy": {"type": "string", "enum": ["none", "restart", "rollback"]},
+            "unhealthy_after_sec": {"type": "integer", "minimum": 15, "maximum": 600},
+            "max_actions_per_hour": {"type": "integer", "minimum": 1, "maximum": 10}
           }
         },
         "restart": {"type": "string"},
@@ -230,7 +247,119 @@ func validateImageSpec(raw json.RawMessage) error {
 			return err
 		}
 	}
+	if policy, ok := fields["health_policy"]; ok {
+		if err := validateHealthPolicy(policy, fields); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateHealthPolicy checks the local shape of spec.health_policy (api-v1
+// v1.15 item 1). Null means all defaults. All four keys are optional. A job
+// is refused, and on_unhealthy other than none needs a healthcheck object.
+// The spec bytes are still forwarded unchanged when this returns nil.
+func validateHealthPolicy(raw json.RawMessage, spec map[string]json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if kind, ok := spec["kind"]; ok {
+		var value string
+		if json.Unmarshal(kind, &value) == nil && value == "job" {
+			return errors.New("health_policy applies to services")
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	var fields map[string]json.RawMessage
+	if err := dec.Decode(&fields); err != nil || fields == nil {
+		return errors.New("health_policy must be an object")
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("health_policy must be an object")
+	}
+	allowed := map[string]struct{}{
+		"on_deploy_failure": {}, "on_unhealthy": {}, "unhealthy_after_sec": {}, "max_actions_per_hour": {},
+	}
+	for key := range fields {
+		if _, ok := allowed[key]; !ok {
+			if safePolicyKey(key) {
+				return fmt.Errorf("unknown field health_policy.%s", key)
+			}
+			return errors.New("invalid health_policy")
+		}
+	}
+	keep := false
+	if value, ok := fields["on_deploy_failure"]; ok {
+		if err := validateEnum(value, "health_policy.on_deploy_failure", "rollback", "stop", "keep"); err != nil {
+			return err
+		}
+		var chosen string
+		_ = json.Unmarshal(value, &chosen)
+		keep = chosen == "keep"
+	}
+	unhealthy := "none"
+	if value, ok := fields["on_unhealthy"]; ok {
+		if err := validateEnum(value, "health_policy.on_unhealthy", "none", "restart", "rollback"); err != nil {
+			return err
+		}
+		_ = json.Unmarshal(value, &unhealthy)
+	}
+	if value, ok := fields["unhealthy_after_sec"]; ok {
+		if err := validateBoundedInt(value, "health_policy.unhealthy_after_sec", policyAfterMin, policyAfterMax); err != nil {
+			return err
+		}
+	}
+	if value, ok := fields["max_actions_per_hour"]; ok {
+		if err := validateBoundedInt(value, "health_policy.max_actions_per_hour", policyActionsMin, policyActionsMax); err != nil {
+			return err
+		}
+	}
+	if unhealthy != "none" && !specHasHealthcheck(spec) {
+		return errors.New("health_policy.on_unhealthy needs a healthcheck")
+	}
+	if keep && unhealthy != "none" {
+		return errors.New("health_policy.on_unhealthy cannot be combined with keep")
+	}
+	return nil
+}
+
+// safePolicyKey is true for a key of at most 64 bytes of [a-z_], the only
+// kind of key that may be named in an error.
+func safePolicyKey(key string) bool {
+	if len(key) == 0 || len(key) > 64 {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		if c := key[i]; c != '_' && (c < 'a' || c > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+func specHasHealthcheck(spec map[string]json.RawMessage) bool {
+	hc, ok := spec["healthcheck"]
+	if !ok {
+		return false
+	}
+	trimmed := bytes.TrimSpace(hc)
+	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+
+// validateEnum accepts a JSON string equal to one of the allowed values. The
+// error lists the allowed values and does not echo the input.
+func validateEnum(raw json.RawMessage, name string, allowed ...string) error {
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		for _, a := range allowed {
+			if value == a {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("%s must be one of %s", name, strings.Join(allowed, ", "))
 }
 
 // validateHealthcheck checks the local shape. Null means the field is omitted.

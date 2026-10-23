@@ -58,7 +58,7 @@ func TestStoredZeroTimers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), leak) || strings.Contains(string(out), "timeout_sec") || strings.Contains(string(out), "healthy_after") {
+	if strings.Contains(string(out), leak) || strings.Contains(string(out), "timeout_sec") || strings.Contains(string(out), `"healthy_after_sec"`) {
 		t.Fatalf("catalog %s", out)
 	}
 	text := summarizeCatalog(out)

@@ -131,6 +131,7 @@ func projectImageEntry(row map[string]any) map[string]any {
 		"env_sets":        stringList(spec["env_sets"]),
 		"healthcheck":     imageHasHealthcheck(spec),
 		"logging":         projectLogging(spec),
+		"health_policy":   projectHealthPolicyFor(spec),
 		"my_actions":      stringList(row["my_actions"]),
 	}
 }
@@ -154,6 +155,53 @@ func projectLogging(spec map[string]any) any {
 		"max_size_mb": size,
 		"max_files":   files,
 	}
+}
+
+// projectHealthPolicyFor is null for a job, which has no health policy.
+func projectHealthPolicyFor(spec map[string]any) any {
+	if stringField(spec, "kind") == "job" {
+		return nil
+	}
+	return projectHealthPolicy(spec)
+}
+
+// projectHealthPolicy returns spec.health_policy with the api-v1 v1.15 defaults
+// filled in for missing or unusable keys. An entry without the field gets the
+// defaults. Unknown keys are not copied.
+func projectHealthPolicy(spec map[string]any) map[string]any {
+	out := map[string]any{
+		"on_deploy_failure":    "rollback",
+		"on_unhealthy":         "none",
+		"unhealthy_after_sec":  45,
+		"max_actions_per_hour": 3,
+	}
+	obj, _ := spec["health_policy"].(map[string]any)
+	if obj == nil {
+		return out
+	}
+	for key, allowed := range map[string][]string{
+		"on_deploy_failure": {"rollback", "stop", "keep"},
+		"on_unhealthy":      {"none", "restart", "rollback"},
+	} {
+		if s, ok := obj[key].(string); ok {
+			for _, a := range allowed {
+				if s == a {
+					out[key] = s
+				}
+			}
+		}
+	}
+	for key, bounds := range map[string][2]int64{
+		"unhealthy_after_sec":  {policyAfterMin, policyAfterMax},
+		"max_actions_per_hour": {policyActionsMin, policyActionsMax},
+	} {
+		if n, ok := integerField(obj[key]); ok {
+			if v, _ := n.Int64(); v >= bounds[0] && v <= bounds[1] {
+				out[key] = n
+			}
+		}
+	}
+	return out
 }
 
 func integerField(v any) (json.Number, bool) {
