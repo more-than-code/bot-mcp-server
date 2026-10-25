@@ -68,3 +68,7 @@ claude mcp add --transport http deploybot https://<mcp>/mcp --header "Authorizat
 ```
 
 The header is the `token` field. The file also stores the API base URL, so the raw file is not a bearer token. bot-mcp-server exchanges that token; it does not forward it to the API.
+
+## License
+
+GNU Affero General Public License v3.0 only (AGPL-3.0-only). See [LICENSE](LICENSE). You may self-host and change bot-mcp-server. If you offer a changed version to users over a network, you must offer them its source code.
