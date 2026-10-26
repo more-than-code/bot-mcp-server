@@ -100,7 +100,7 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Ha
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.Handle("GET /.well-known/oauth-protected-resource", auth.ProtectedResource(cfg.PublicOrigin, cfg.APIURL))
-	mux.Handle("/mcp", checked)
+	mux.Handle("/mcp", withAccessLog(logger, checked))
 	return mux, nil
 }
 
