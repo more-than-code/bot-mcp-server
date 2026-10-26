@@ -7,6 +7,7 @@ import (
 )
 
 func TestHealthcheckShape(t *testing.T) {
+	const healthTestKeyword = "invalid healthcheck.test: give the command itself, without CMD, CMD-SHELL or NONE"
 	const sentinel = "argv-sentinel-do-not-echo"
 	many := `["` + sentinel + `"`
 	for i := 0; i < 32; i++ {
@@ -20,6 +21,15 @@ func TestHealthcheckShape(t *testing.T) {
 		want string
 	}{
 		{`{"kind":"service","image":"nginx","healthcheck":{"test":["redis-cli","ping"]}}`, ""},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["sh","-c","x"]}}`, ""},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["echo","CMD"]}}`, ""},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["cmd","true"]}}`, ""},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","redis-cli","ping"]}}`, healthTestKeyword},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["CMD-SHELL","` + sentinel + `"]}}`, healthTestKeyword},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["NONE"]}}`, healthTestKeyword},
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"]}}`, healthTestKeyword},
+		// The match is exact (api-v1 v1.18 item 1), so "CMD " with a trailing space is a command, not the keyword.
+		{`{"kind":"service","image":"nginx","healthcheck":{"test":["CMD ","x"]}}`, ""},
 		{`{"kind":"service","image":"nginx","healthcheck":{"test":["` + edge + `"],"interval_sec":5,"timeout_sec":1,"retries":1,"start_period_sec":0}}`, ""},
 		{`{"kind":"service","image":"nginx","healthcheck":{"test":["ok"],"interval_sec":300,"timeout_sec":60,"retries":10,"start_period_sec":600}}`, ""},
 		{`{"kind":"service","image":"nginx","healthcheck":null}`, ""},

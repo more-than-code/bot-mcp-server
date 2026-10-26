@@ -27,7 +27,8 @@ var imageSpecKeys = map[string]struct{}{
 	"memory_mb": {}, "timeout_sec": {},
 }
 
-// Healthcheck bounds match api-v1 v1.11 item 7. Defaults, timeout_sec <
+// Healthcheck bounds match api-v1 v1.11 item 7, and a leading CMD, CMD-SHELL
+// or NONE is refused as in v1.18 item 1. Defaults, timeout_sec <
 // interval_sec, the job rule, and NUL checks stay with the API.
 const (
 	healthTestMin  = 1
@@ -86,6 +87,7 @@ const catalogWriteSchema = `{
           "properties": {
             "test": {
               "type": "array",
+              "description": "The command and its arguments, without CMD or CMD-SHELL.",
               "minItems": 1,
               "maxItems": 32,
               "items": {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -466,13 +468,16 @@ func validateHealthTest(raw json.RawMessage) error {
 	if len(items) < healthTestMin || len(items) > healthTestMax {
 		return errors.New("healthcheck.test must be 1 to 32 strings")
 	}
-	for _, item := range items {
+	for i, item := range items {
 		var text string
 		if err := json.Unmarshal(item, &text); err != nil {
 			return errors.New("healthcheck.test must be 1 to 32 strings")
 		}
 		if len(text) < healthArgMin || len(text) > healthArgMax {
 			return errors.New("healthcheck.test items must be 1 to 1024 bytes")
+		}
+		if i == 0 && (text == "CMD" || text == "CMD-SHELL" || text == "NONE") {
+			return errors.New("invalid healthcheck.test: give the command itself, without CMD, CMD-SHELL or NONE")
 		}
 	}
 	return nil

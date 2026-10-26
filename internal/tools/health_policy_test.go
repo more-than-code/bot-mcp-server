@@ -42,7 +42,7 @@ func TestHealthPolicySchema(t *testing.T) {
 
 func TestHealthPolicyShape(t *testing.T) {
 	const sentinel = "policy-secret-do-not-echo"
-	hc := `,"healthcheck":{"test":["CMD","true"]}`
+	hc := `,"healthcheck":{"test":["true"]}`
 	cases := []struct{ spec, want string }{
 		{`{"kind":"service","image":"nginx"}`, ""},
 		{`{"kind":"service","image":"nginx","health_policy":null}`, ""},
