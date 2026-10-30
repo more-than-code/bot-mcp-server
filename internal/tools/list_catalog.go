@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -27,7 +28,7 @@ const listCatalogSchema = `{
 func registerListCatalog(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, &mcp.Tool{
 		Name:        "list_catalog",
-		Description: "List catalog entries in a project. Returns name, kind, command_display, and the actions the caller may take. An image entry also returns the image reference, service or job, ports, volume short names, managed file names, env key names, env set names, healthcheck true or false (not the healthcheck command), and logging as max_size_mb and max_files or null. It does not return env values, file contents, or file targets. Does not return the program spec or its environment. Does not contact the host.",
+		Description: "List catalog entries in a project. Returns name, kind, command_display, last_deployed_at (RFC3339 time of the newest deploy or run by a person or AI agent, or null), and the actions the caller may take. An image entry also returns the image reference, service or job, ports, volume short names, managed file names, env key names, env set names, healthcheck true or false (not the healthcheck command), and logging as max_size_mb and max_files or null. It does not return env values, file contents, or file targets. Does not return the program spec or its environment. Does not contact the host.",
 		Annotations: readOnlyAnnotations(false),
 		InputSchema: json.RawMessage(listCatalogSchema),
 	}, func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
@@ -54,7 +55,7 @@ func registerListCatalog(server *mcp.Server, api *apiclient.Client) {
 }
 
 // projectCatalog returns only an items array of allowlisted fields.
-// A program keeps name, kind, command_display, and my_actions.
+// Every item keeps name, kind, command_display, last_deployed_at, and my_actions.
 // An image also keeps the image reference, service or job, ports, volume
 // short names, file names, env key names, env set names, healthcheck
 // true or false, and logging as max_size_mb and max_files or null.
@@ -81,22 +82,38 @@ func projectCatalog(raw json.RawMessage) (json.RawMessage, error) {
 		if !ok {
 			continue
 		}
+		var entry map[string]any
 		if stringField(row, "kind") == "image" {
-			projected = append(projected, projectImageEntry(row))
-			continue
+			entry = projectImageEntry(row)
+		} else {
+			entry = map[string]any{
+				"name":            replaceControls(stringField(row, "name")),
+				"kind":            replaceControls(stringField(row, "kind")),
+				"command_display": publicString(stringField(row, "command_display")),
+				"my_actions":      stringList(row["my_actions"]),
+			}
 		}
-		projected = append(projected, map[string]any{
-			"name":            replaceControls(stringField(row, "name")),
-			"kind":            replaceControls(stringField(row, "kind")),
-			"command_display": publicString(stringField(row, "command_display")),
-			"my_actions":      stringList(row["my_actions"]),
-		})
+		entry["last_deployed_at"] = lastDeployedAt(row)
+		projected = append(projected, entry)
 	}
 	out, err := json.Marshal(map[string]any{"items": projected})
 	if err != nil {
 		return nil, errCatalogShape
 	}
 	return out, nil
+}
+
+// lastDeployedAt keeps the api-v1 v1.21 last_deployed_at string when it is
+// an RFC3339 time. Missing (an older API), null, or any other value is null.
+func lastDeployedAt(row map[string]any) any {
+	s, ok := row["last_deployed_at"].(string)
+	if !ok {
+		return nil
+	}
+	if _, err := time.Parse(time.RFC3339, s); err != nil {
+		return nil
+	}
+	return s
 }
 
 // publicString redacts URL userinfo and token-shaped text, then replaces controls.

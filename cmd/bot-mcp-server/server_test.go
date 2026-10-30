@@ -1755,6 +1755,34 @@ func (f *fakeAPI) reply(r *http.Request) (int, string, string, any) {
 				},
 			}}
 		}
+		if mode == "catalog-last-deployed" {
+			return http.StatusOK, "ok", "", map[string]any{"items": []any{
+				map[string]any{
+					"name": "tra-backend", "kind": "program", "command_display": "pnpm start",
+					"my_actions": []any{"run"}, "last_deployed_at": "2026-10-29T08:15:00Z",
+				},
+				map[string]any{
+					"name": "redis", "kind": "image", "command_display": "redis:7",
+					"spec":       map[string]any{"kind": "service", "image": "redis:7"},
+					"my_actions": []any{"deploy"}, "last_deployed_at": "2026-10-30T01:02:03.456Z",
+				},
+				map[string]any{
+					"name": "nginx", "kind": "image", "command_display": "nginx:1",
+					"spec":       map[string]any{"kind": "service", "image": "nginx:1"},
+					"my_actions": []any{"deploy"}, "last_deployed_at": nil,
+				},
+				map[string]any{
+					"name": "old", "kind": "image", "command_display": "old:1",
+					"spec":       map[string]any{"kind": "service", "image": "old:1"},
+					"my_actions": []any{"deploy"},
+				},
+				map[string]any{
+					"name": "bad", "kind": "image", "command_display": "bad:1",
+					"spec":       map[string]any{"kind": "service", "image": "bad:1"},
+					"my_actions": []any{"deploy"}, "last_deployed_at": "last-deployed-do-not-keep",
+				},
+			}}
+		}
 		if mode == "catalog-logging" {
 			return http.StatusOK, "ok", "", map[string]any{"items": []any{
 				map[string]any{

@@ -218,7 +218,7 @@ func TestImageCatalog(t *testing.T) {
 		t.Fatalf("items %d", len(items))
 	}
 	prog, _ := items[0].(map[string]any)
-	if prog["name"] != entryName || prog["kind"] != "program" || len(prog) != 4 {
+	if prog["name"] != entryName || prog["kind"] != "program" || len(prog) != 5 {
 		t.Fatalf("program %#v", prog)
 	}
 	display, _ := prog["command_display"].(string)

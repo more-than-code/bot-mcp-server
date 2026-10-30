@@ -111,7 +111,7 @@ func TestDockerHealthCatalogAndLogs(t *testing.T) {
 		t.Fatalf("items %#v", items)
 	}
 	prog, _ := items[0].(map[string]any)
-	if _, ok := prog["healthcheck"]; ok || len(prog) != 4 {
+	if _, ok := prog["healthcheck"]; ok || len(prog) != 5 {
 		t.Fatalf("program %#v", prog)
 	}
 	redis, _ := items[1].(map[string]any)

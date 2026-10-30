@@ -166,7 +166,7 @@ func TestProjectCatalogImageOmitsValues(t *testing.T) {
 		t.Fatalf("items %d", len(body.Items))
 	}
 	prog := body.Items[0]
-	if len(prog) != 4 || prog["name"] != "tra-backend" || prog["kind"] != "program" {
+	if len(prog) != 5 || prog["name"] != "tra-backend" || prog["kind"] != "program" {
 		t.Fatalf("program %#v", prog)
 	}
 	img := body.Items[1]

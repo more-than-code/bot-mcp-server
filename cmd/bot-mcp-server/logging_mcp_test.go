@@ -112,7 +112,7 @@ func TestLoggingCatalogList(t *testing.T) {
 		t.Fatalf("items %#v", items)
 	}
 	prog, _ := items[0].(map[string]any)
-	if _, ok := prog["logging"]; ok || len(prog) != 4 || prog["kind"] != "program" {
+	if _, ok := prog["logging"]; ok || len(prog) != 5 || prog["kind"] != "program" {
 		t.Fatalf("program %#v", prog)
 	}
 	redis, _ := items[1].(map[string]any)
