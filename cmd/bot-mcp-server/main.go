@@ -71,7 +71,7 @@ func newHandler(cfg config, api *apiclient.Client, logger *slog.Logger) (http.Ha
 	}
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "bot-mcp-server",
-		Version: "0.2.21",
+		Version: "0.2.24",
 	}, &mcp.ServerOptions{
 		Logger:       logger,
 		Capabilities: &mcp.ServerCapabilities{},
