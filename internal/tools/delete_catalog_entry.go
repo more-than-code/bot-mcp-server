@@ -12,7 +12,7 @@ import (
 func registerDeleteCatalogEntry(server *mcp.Server, api *apiclient.Client) {
 	addTool(server, catalogWriteTool(
 		"delete_catalog_entry",
-		"Delete a catalog entry. Nothing changes until confirm after the user agrees. A program entry is console-only. Running containers are not stopped. Does not contact the host.",
+		"Image entries only. Delete an image catalog entry. Nothing changes until confirm after the user agrees. Program entries are deleted in the console. Running containers are not stopped. Does not contact the host.",
 		catalogDeleteSchema,
 	), func(ctx context.Context, raw json.RawMessage) *mcp.CallToolResult {
 		var in catalogDeleteArgs
