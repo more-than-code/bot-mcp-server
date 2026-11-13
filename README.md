@@ -1,5 +1,7 @@
 # bot-mcp-server
 
+> **Archived (2026-11-14).** This repo moved into [more-than-code/bot-control-plane](https://github.com/more-than-code/bot-control-plane) as [`mcp/`](https://github.com/more-than-code/bot-control-plane/tree/main/mcp), with its full history. Releases from v0.2.29 on come from there. This repo is read-only.
+
 Stateless MCP gateway (Streamable HTTP at `/mcp`) for external AI agents. Every tool call is forwarded to bot-api-server with a short-lived token exchanged from the caller's user token, so permissions are exactly the console's. It also contains `deploybot login`, a device-code login CLI.
 
 - Design: `docs/design.md`.
